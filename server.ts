@@ -421,24 +421,65 @@ app.post('/api/process-media', async (req: Request, res: Response) => {
         mediaContext += `YouTube Video ID: ${ytId}\n`;
       }
 
-      parts.push({
-        text: `The user has submitted an audiovisual media source to transcribe and translate:
+      // Check if mediaUrl is a direct audio or video file that can be fetched
+      const isDirectMedia = /\.(mp3|wav|ogg|m4a|aac|flac)(\?.*)?$/i.test(mediaUrl);
+      let directAudioBuffer: Buffer | null = null;
+      let directMime = 'audio/mp3';
+
+      if (isDirectMedia) {
+        try {
+          console.log(`[TransLumina] Attempting direct media stream download: ${mediaUrl}`);
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 8000);
+          const fetchRes = await fetch(mediaUrl, { signal: controller.signal });
+          clearTimeout(timeout);
+          if (fetchRes.ok) {
+            const arrayBuf = await fetchRes.arrayBuffer();
+            if (arrayBuf.byteLength > 0 && arrayBuf.byteLength <= 25 * 1024 * 1024) {
+              directAudioBuffer = Buffer.from(arrayBuf);
+              directMime = fetchRes.headers.get('content-type') || 'audio/mp3';
+              console.log(`[TransLumina] Successfully downloaded direct audio (${(directAudioBuffer.length / 1024 / 1024).toFixed(2)} MB)`);
+            }
+          }
+        } catch (fetchErr) {
+          console.warn('[TransLumina] Direct audio fetch skipped or timed out:', fetchErr);
+        }
+      }
+
+      if (directAudioBuffer) {
+        parts.push({
+          inlineData: {
+            mimeType: directMime,
+            data: directAudioBuffer.toString('base64'),
+          },
+        });
+        parts.push({
+          text: `Analyze the provided audiovisual recording from ${mediaTitle || 'User Media'}.
+1. Transcribe the speech accurately in its source language (${sourceLanguage}).
+2. Translate each sentence into natural ${targetLanguage}.
+3. Create 12 to 20 well-paced chronological subtitle segments with continuous start and end timestamps (in seconds).
+4. Provide a clear title, executive summary, and 3-5 key topics.`,
+        });
+      } else {
+        parts.push({
+          text: `You are transcribing and translating the following audiovisual media:
 ${mediaContext}
 
 Instructions:
-1. Provide a comprehensive, accurate spoken transcript of this media in the source language (${sourceLanguage}).
-2. Translate every spoken line into ${targetLanguage}.
-3. Create realistic chronological subtitle segments with continuous, non-overlapping timestamps ('start' and 'end' in seconds, starting from 0.0s).
-4. Each segment should contain between 4 and 15 words, natural for subtitle readers.
-5. Identify speakers if distinct (e.g., 'Speaker 1', 'Host', 'Narrator').
-6. Provide an informative summary and key topic tags.`,
-      });
+1. Provide an authentic, high-fidelity spoken transcript in the source language (${sourceLanguage}).
+2. Translate every spoken line faithfully into ${targetLanguage}.
+3. Produce between 12 and 22 cohesive subtitle segments with continuous, non-overlapping timestamps ('start' and 'end' in seconds, starting from 0.0s).
+4. Each segment should represent 1-2 complete, natural thoughts (typically 8 to 20 words, lasting 3 to 6 seconds).
+5. Identify speakers (e.g. 'Speaker 1', 'Narrator', 'Host', or named speaker).
+6. Provide a concise summary and 3-5 key topics.`,
+        });
+      }
     }
 
-    const systemInstruction = `You are a professional audiovisual transcription and localization AI studio.
+    const systemInstruction = `You are an expert audiovisual transcription and localization AI studio.
 You produce high-accuracy timestamped transcripts and culturally nuanced translations suitable for broadcast subtitles (SRT/VTT).
-Ensure 'start' and 'end' are numbers in seconds (e.g. 0.0, 4.5).
-Ensure originalText and translatedText are clean and non-empty.`;
+Return clean, non-overlapping segments with realistic start and end times in seconds.
+Keep the output concise, accurate, and rapid.`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',

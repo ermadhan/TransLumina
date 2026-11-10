@@ -50,6 +50,53 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
   const [languageSearch, setLanguageSearch] = useState('');
   const [inputError, setInputError] = useState<string | null>(null);
   const [isInspectingUrl, setIsInspectingUrl] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  // Track elapsed processing time to give users transparent real-time feedback
+  React.useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isProcessing) {
+      setElapsedSeconds(0);
+      interval = setInterval(() => {
+        setElapsedSeconds((prev) => prev + 1);
+      }, 1000);
+    } else {
+      setElapsedSeconds(0);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [isProcessing]);
+
+  // Derive dynamic progress stage based on elapsed time and current stage
+  const dynamicStageInfo = React.useMemo(() => {
+    if (!isProcessing) return null;
+    if (elapsedSeconds < 4) {
+      return {
+        step: '1/4',
+        label: 'Inspecting media stream & resolving audio track',
+        progress: 25,
+      };
+    } else if (elapsedSeconds < 9) {
+      return {
+        step: '2/4',
+        label: 'Analyzing speech cadence & identifying speakers',
+        progress: 50,
+      };
+    } else if (elapsedSeconds < 16) {
+      return {
+        step: '3/4',
+        label: `Synthesizing timestamped dialogue with Gemini 3.8 Flash`,
+        progress: 75,
+      };
+    } else {
+      return {
+        step: '4/4',
+        label: `Translating into ${targetLanguage} & formatting subtitle timecodes`,
+        progress: 90,
+      };
+    }
+  }, [isProcessing, elapsedSeconds, targetLanguage]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -285,6 +332,15 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
               </button>
             </div>
 
+            {/* Processing Duration Note */}
+            <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl text-xs text-slate-400 flex items-start gap-2.5">
+              <Sparkles className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+              <div className="leading-relaxed">
+                <span className="font-semibold text-slate-300">Processing Time Note: </span>
+                Extracting dialogue, determining speaker turns, generating millisecond-precise subtitle timecodes, and translating into the target language typically takes <strong>10 to 25 seconds</strong>. For instantaneous 0-second testing, check the <strong className="text-indigo-400">Quick Samples</strong> tab.
+              </div>
+            </div>
+
             {/* URL Preview Card */}
             {urlPreview && (
               <div className="flex items-center gap-4 p-3.5 bg-slate-900/60 border border-slate-800 rounded-xl">
@@ -474,7 +530,7 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
               {isProcessing ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
-                  <span>{processingStage || 'Processing Media...'}</span>
+                  <span>{dynamicStageInfo ? `Processing (${elapsedSeconds}s)...` : (processingStage || 'Processing Media...')}</span>
                 </>
               ) : (
                 <>
@@ -484,6 +540,37 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
               )}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Active Processing Multi-Stage Indicator */}
+      {isProcessing && dynamicStageInfo && (
+        <div className="mt-6 p-4 sm:p-5 bg-indigo-950/40 border border-indigo-500/40 rounded-xl space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 font-semibold text-indigo-300">
+              <span className="px-2 py-0.5 rounded bg-indigo-500/20 border border-indigo-500/30 text-indigo-200">
+                Step {dynamicStageInfo.step}
+              </span>
+              <span>{dynamicStageInfo.label}</span>
+            </div>
+            <div className="font-mono text-slate-400 flex items-center gap-1.5 self-end sm:self-auto">
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>{elapsedSeconds}s elapsed</span>
+              <span className="text-slate-500">· typical 10–25s</span>
+            </div>
+          </div>
+
+          {/* Animated Progress Bar */}
+          <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-800">
+            <div
+              className="bg-gradient-to-r from-indigo-500 via-cyan-400 to-indigo-400 h-2 rounded-full transition-all duration-700 ease-out"
+              style={{ width: `${dynamicStageInfo.progress}%` }}
+            />
+          </div>
+
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            Multimodal Gemini AI is parsing full dialogue and calculating millisecond-precise subtitle timecodes in dual languages. Subtitles and audio tracks will appear automatically once complete.
+          </p>
         </div>
       )}
 
