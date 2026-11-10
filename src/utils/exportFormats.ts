@@ -84,10 +84,11 @@ export function generateTXT(
     .map((seg) => {
       const timecode = withTimestamps ? `[${formatDisplayTime(seg.start)} - ${formatDisplayTime(seg.end)}] ` : '';
       const speaker = seg.speaker ? `${seg.speaker}: ` : '';
+      const translated = (seg.translatedText && seg.translatedText.trim()) || seg.originalText;
       if (mode === 'bilingual') {
-        return `${timecode}${speaker}${seg.translatedText}\n${withTimestamps ? '        ' : ''}(Original: ${seg.originalText})\n`;
+        return `${timecode}${speaker}${translated}\n${withTimestamps ? '        ' : ''}(Original: ${seg.originalText})\n`;
       } else if (mode === 'translated') {
-        return `${timecode}${speaker}${seg.translatedText || seg.originalText}`;
+        return `${timecode}${speaker}${translated}`;
       } else {
         return `${timecode}${speaker}${seg.originalText}`;
       }
@@ -129,14 +130,16 @@ export function generateMarkdown(
     md += `| :--- | :--- | :--- |\n`;
     segments.forEach((seg) => {
       const time = `\`${formatDisplayTime(seg.start)} - ${formatDisplayTime(seg.end)}\``;
-      const cleanTrans = (seg.translatedText || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+      const trans = (seg.translatedText && seg.translatedText.trim()) || seg.originalText;
+      const cleanTrans = trans.replace(/\|/g, '\\|').replace(/\n/g, ' ');
       const cleanOrig = (seg.originalText || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
       md += `| ${time} | ${cleanTrans} | ${cleanOrig} |\n`;
     });
   } else {
     segments.forEach((seg) => {
       const time = `\`${formatDisplayTime(seg.start)}\``;
-      const text = mode === 'translated' ? seg.translatedText : seg.originalText;
+      const trans = (seg.translatedText && seg.translatedText.trim()) || seg.originalText;
+      const text = mode === 'translated' ? trans : seg.originalText;
       const speaker = seg.speaker ? `**${seg.speaker}**: ` : '';
       md += `- ${time} ${speaker}${text}\n`;
     });

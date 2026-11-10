@@ -20,9 +20,9 @@ const PORT = Number(process.env.PORT) || 3000;
 
 import fs from 'fs';
 
-// Body parsing with generous limit for audio/video media uploads
-app.use(express.json({ limit: '60mb' }));
-app.use(express.urlencoded({ extended: true, limit: '60mb' }));
+// Body parsing with generous limit for audio/video media uploads (100MB)
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Dedicated route to stream real spoken audio MP3s
 app.get('/api/audio/:filename', (req: Request, res: Response) => {
@@ -94,6 +94,77 @@ function extractYouTubeId(url: string): string | null {
   return null;
 }
 
+/**
+ * SSRF Protection Validator:
+ * Ensures URLs only target public, safe web hosts over standard HTTP/HTTPS.
+ * Disallows private/internal IP ranges, link-local, cloud metadata, and loopback addresses.
+ */
+function isSafeExternalUrl(inputUrl: string): boolean {
+  try {
+    const parsed = new URL(inputUrl);
+    // Protocol check: only http and https
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Block obvious loopback, localhost, and internal domain names
+    if (
+      hostname === 'localhost' ||
+      hostname.endsWith('.localhost') ||
+      hostname.endsWith('.internal') ||
+      hostname.endsWith('.local') ||
+      hostname === 'metadata.google.internal' ||
+      hostname === '169.254.169.254'
+    ) {
+      return false;
+    }
+
+    // Check for IP address format and block private / loopback IP spaces
+    const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4Match) {
+      const octet1 = parseInt(ipv4Match[1], 10);
+      const octet2 = parseInt(ipv4Match[2], 10);
+
+      // Loopback (127.0.0.0/8)
+      if (octet1 === 127) return false;
+      // Current network (0.0.0.0/8)
+      if (octet1 === 0) return false;
+      // Private Class A (10.0.0.0/8)
+      if (octet1 === 10) return false;
+      // Private Class B (172.16.0.0/12: 172.16 - 172.31)
+      if (octet1 === 172 && octet2 >= 16 && octet2 <= 31) return false;
+      // Private Class C (192.168.0.0/16)
+      if (octet1 === 192 && octet2 === 168) return false;
+      // Link-local / Cloud metadata (169.254.0.0/16)
+      if (octet1 === 169 && octet2 === 254) return false;
+      // Broadcast / Multicast
+      if (octet1 >= 224) return false;
+    }
+
+    // Block IPv6 loopback / local addresses
+    if (
+      hostname === '::1' ||
+      hostname.startsWith('fe80:') ||
+      hostname.startsWith('fc00:') ||
+      hostname.startsWith('fd00:') ||
+      hostname.includes('::')
+    ) {
+      return false;
+    }
+
+    // Port check: disallow non-standard internal ports
+    if (parsed.port && parsed.port !== '80' && parsed.port !== '443' && parsed.port !== '8080' && parsed.port !== '8443') {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Health check endpoint
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
@@ -111,6 +182,9 @@ app.post('/api/extract-url-info', async (req: Request, res: Response) => {
     }
 
     const trimmedUrl = url.trim();
+    if (!isSafeExternalUrl(trimmedUrl)) {
+      return res.status(400).json({ error: 'Invalid or restricted media URL.' });
+    }
     const ytId = extractYouTubeId(trimmedUrl);
 
     if (ytId) {
@@ -418,6 +492,7 @@ app.post('/api/process-media', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Either audioData or mediaUrl is required.' });
     }
 
+    let directMediaBuffer: Buffer | null = null;
     const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
 
     if (audioData) {
@@ -437,6 +512,10 @@ app.post('/api/process-media', async (req: Request, res: Response) => {
 5. Provide a title, brief summary, and 3-5 key topics.`,
       });
     } else if (mediaUrl) {
+      if (!isSafeExternalUrl(mediaUrl.trim())) {
+        return res.status(400).json({ error: 'Invalid or restricted media URL.' });
+      }
+
       // Media link (YouTube, podcast, or direct web stream)
       const ytId = extractYouTubeId(mediaUrl);
       let mediaContext = `Media URL: ${mediaUrl}\nTitle: ${mediaTitle || 'User Media'}\n`;
@@ -444,57 +523,100 @@ app.post('/api/process-media', async (req: Request, res: Response) => {
         mediaContext += `YouTube Video ID: ${ytId}\n`;
       }
 
-      // Check if mediaUrl is a direct audio or video file that can be fetched
-      const isDirectMedia = /\.(mp3|wav|ogg|m4a|aac|flac)(\?.*)?$/i.test(mediaUrl);
-      let directAudioBuffer: Buffer | null = null;
-      let directMime = 'audio/mp3';
+      // Helper to determine exact media MIME type
+      const getMediaMimeType = (targetUrl: string, headerType?: string | null): string => {
+        if (headerType) {
+          const cleanHeader = headerType.split(';')[0].trim().toLowerCase();
+          if (cleanHeader.startsWith('audio/') || cleanHeader.startsWith('video/')) {
+            return cleanHeader;
+          }
+        }
+        const clean = targetUrl.split('?')[0].toLowerCase();
+        if (clean.endsWith('.mp4')) return 'video/mp4';
+        if (clean.endsWith('.webm')) return 'video/webm';
+        if (clean.endsWith('.mov')) return 'video/quicktime';
+        if (clean.endsWith('.mkv')) return 'video/x-matroska';
+        if (clean.endsWith('.m4v') || clean.endsWith('.avi')) return 'video/mp4';
+        if (clean.endsWith('.mp3')) return 'audio/mpeg';
+        if (clean.endsWith('.wav')) return 'audio/wav';
+        if (clean.endsWith('.ogg') || clean.endsWith('.opus')) return 'audio/ogg';
+        if (clean.endsWith('.m4a') || clean.endsWith('.aac')) return 'audio/mp4';
+        if (clean.endsWith('.flac')) return 'audio/flac';
+        return 'audio/mpeg';
+      };
 
-      if (isDirectMedia) {
+      // Check if mediaUrl is a direct media file (audio OR video)
+      const isDirectMediaExt = /\.(mp3|wav|ogg|m4a|aac|flac|opus|mp4|webm|mov|mkv|avi|m4v)(\?.*)?$/i.test(mediaUrl);
+      const isYouTube = !!ytId;
+      const isSpotify = mediaUrl.includes('spotify.com');
+
+      directMediaBuffer = null;
+      let directMime = 'audio/mpeg';
+
+      // Attempt to download direct media stream for non-YouTube / non-Spotify links or direct files
+      if (!isYouTube && !isSpotify) {
         try {
-          console.log(`[TransLumina] Attempting direct media stream download: ${mediaUrl}`);
+          console.log(`[TransLumina] Fetching direct media stream from: ${mediaUrl}`);
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 8000);
-          const fetchRes = await fetch(mediaUrl, { signal: controller.signal });
+          const timeout = setTimeout(() => controller.abort(), 12000);
+          const fetchRes = await fetch(mediaUrl, {
+            signal: controller.signal,
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': 'audio/*,video/*,*/*',
+            },
+          });
           clearTimeout(timeout);
+
           if (fetchRes.ok) {
-            const arrayBuf = await fetchRes.arrayBuffer();
-            if (arrayBuf.byteLength > 0 && arrayBuf.byteLength <= 25 * 1024 * 1024) {
-              directAudioBuffer = Buffer.from(arrayBuf);
-              directMime = fetchRes.headers.get('content-type') || 'audio/mp3';
-              console.log(`[TransLumina] Successfully downloaded direct audio (${(directAudioBuffer.length / 1024 / 1024).toFixed(2)} MB)`);
+            const contentType = fetchRes.headers.get('content-type') || '';
+            const isMediaContent = contentType.startsWith('audio/') || contentType.startsWith('video/') || isDirectMediaExt;
+
+            if (isMediaContent) {
+              const arrayBuf = await fetchRes.arrayBuffer();
+              if (arrayBuf.byteLength > 0 && arrayBuf.byteLength <= 35 * 1024 * 1024) {
+                directMediaBuffer = Buffer.from(arrayBuf);
+                directMime = getMediaMimeType(mediaUrl, contentType);
+                console.log(`[TransLumina] Successfully downloaded direct media (${(directMediaBuffer.length / 1024 / 1024).toFixed(2)} MB, ${directMime})`);
+              } else if (arrayBuf.byteLength > 35 * 1024 * 1024) {
+                console.warn(`[TransLumina] Direct media stream exceeds 35MB limit (${(arrayBuf.byteLength / 1024 / 1024).toFixed(2)} MB)`);
+              }
             }
           }
         } catch (fetchErr) {
-          console.warn('[TransLumina] Direct audio fetch skipped or timed out:', fetchErr);
+          console.warn('[TransLumina] Direct media stream fetch skipped or timed out:', fetchErr);
         }
       }
 
-      if (directAudioBuffer) {
+      if (directMediaBuffer) {
+        // True acoustic audio/video analysis from real media bytes
         parts.push({
           inlineData: {
             mimeType: directMime,
-            data: directAudioBuffer.toString('base64'),
+            data: directMediaBuffer.toString('base64'),
           },
         });
         parts.push({
-          text: `Analyze the provided audiovisual recording from ${mediaTitle || 'User Media'}.
-1. Transcribe the speech accurately in its source language (${sourceLanguage}).
+          text: `You have received the real binary audiovisual recording for "${mediaTitle || 'User Media'}".
+Listen directly to the spoken speech in the audio track:
+1. Transcribe the authentic spoken dialogue in its original language (${sourceLanguage}).
 2. Translate each sentence into natural ${targetLanguage}.
-3. Create 12 to 20 well-paced chronological subtitle segments with continuous start and end timestamps (in seconds).
+3. Create 12 to 22 well-paced chronological subtitle segments with continuous start and end timestamps (in seconds).
 4. Provide a clear title, executive summary, and 3-5 key topics.`,
         });
       } else {
+        // External platform link (YouTube, Spotify, etc.) where datacenter audio streaming is restricted
         parts.push({
-          text: `You are transcribing and translating the following audiovisual media:
+          text: `The user has submitted an external media source:
 ${mediaContext}
 
 Instructions:
-1. Provide an authentic, high-fidelity spoken transcript in the source language (${sourceLanguage}).
-2. Translate every spoken line faithfully into ${targetLanguage}.
-3. Produce between 12 and 22 cohesive subtitle segments with continuous, non-overlapping timestamps ('start' and 'end' in seconds, starting from 0.0s).
-4. Each segment should represent 1-2 complete, natural thoughts (typically 8 to 20 words, lasting 3 to 6 seconds).
-5. Identify speakers (e.g. 'Speaker 1', 'Narrator', 'Host', or named speaker).
-6. Provide a concise summary and 3-5 key topics.`,
+1. Streaming platforms (${isYouTube ? 'YouTube' : isSpotify ? 'Spotify' : 'the remote platform'}) restrict direct server-side audio downloads. Do NOT fabricate or invent fictional dialogue quotes if you do not know the actual spoken content of this video/track.
+2. If this is a publicly recognized video, keynote, song, or talk with verified dialogue or lyrics, transcribe the authentic words and align with realistic timestamps.
+3. If specific spoken words cannot be verified, provide an authentic topic summary, outline the discussion points, and note that direct acoustic waveform speech recognition is available by uploading the audio/video file in the File Upload tab.
+4. Translate all dialogue segments into ${targetLanguage}.
+5. Produce realistic subtitle segments with start and end timestamps.
+6. Provide an informative summary and key topic tags.`,
         });
       }
     }
@@ -502,7 +624,7 @@ Instructions:
     const systemInstruction = `You are an expert audiovisual transcription and localization AI studio.
 You produce high-accuracy timestamped transcripts and culturally nuanced translations suitable for broadcast subtitles (SRT/VTT).
 Return clean, non-overlapping segments with realistic start and end times in seconds.
-Keep the output concise, accurate, and rapid.`;
+Ensure originalText and translatedText are clean, non-empty, and faithful to the source material.`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
@@ -546,13 +668,21 @@ Keep the output concise, accurate, and rapid.`;
     
     // Ensure ids and valid numbers
     if (parsed.segments && Array.isArray(parsed.segments)) {
-      parsed.segments = parsed.segments.map((seg: { id?: string; start: number; end: number; [key: string]: unknown }, idx: number) => ({
-        ...seg,
-        id: seg.id || `seg-${idx + 1}`,
-        start: typeof seg.start === 'number' && !isNaN(seg.start) ? Math.max(0, seg.start) : idx * 5,
-        end: typeof seg.end === 'number' && !isNaN(seg.end) ? Math.max(seg.start + 1, seg.end) : (idx + 1) * 5,
-      }));
+      parsed.segments = parsed.segments.map((seg: { id?: string; start: number; end: number; [key: string]: unknown }, idx: number) => {
+        const safeStart = typeof seg.start === 'number' && !isNaN(seg.start) ? Math.max(0, seg.start) : idx * 5;
+        const rawEnd = typeof seg.end === 'number' && !isNaN(seg.end) ? seg.end : safeStart + 4;
+        const safeEnd = Math.max(safeStart + 0.5, rawEnd);
+        return {
+          ...seg,
+          id: seg.id || `seg-${idx + 1}`,
+          start: Number(safeStart.toFixed(2)),
+          end: Number(safeEnd.toFixed(2)),
+        };
+      });
     }
+
+    const hasAcousticData = Boolean(audioData || directMediaBuffer);
+    parsed.transcriptType = hasAcousticData ? 'acoustic-waveform' : 'web-grounded';
 
     res.json({
       success: true,

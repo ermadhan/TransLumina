@@ -100,54 +100,102 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
   }, [isProcessing, elapsedSeconds, targetLanguage]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const activeRequestIdRef = useRef<number>(0);
 
-  // Handle URL Inspection when user types or pastes
-  const handleUrlChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Clear debounce timer on unmount
+  React.useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    };
+  }, []);
+
+  // Handle URL Inspection with debounce and stale-response guard
+  const handleUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setUrlInput(val);
     setInputError(null);
 
-    if (!val.trim()) {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+
+    const trimmed = val.trim();
+    if (!trimmed) {
       setUrlPreview(null);
+      setIsInspectingUrl(false);
       return;
     }
 
-    const ytId = extractYouTubeId(val);
+    const ytId = extractYouTubeId(trimmed);
+    const isDirectMedia = /\.(mp3|wav|ogg|m4a|aac|flac|mp4|webm|mov)(\?.*)?$/i.test(trimmed);
+    const isSpotify = trimmed.includes('spotify.com');
+
+    // If input is not a recognized media URL, immediately clear any previous preview
+    if (!ytId && !isDirectMedia && !isSpotify) {
+      setUrlPreview(null);
+      setIsInspectingUrl(false);
+      return;
+    }
+
+    // Set provisional preview immediately for fast feedback
     if (ytId) {
-      setIsInspectingUrl(true);
-      // Immediately set provisional preview with thumbnail while inspecting
       setUrlPreview({
         type: 'youtube',
-        title: val.includes('/shorts/') ? 'YouTube Short' : 'YouTube Video',
+        title: trimmed.includes('/shorts/') ? 'YouTube Short' : 'YouTube Video',
         thumbnailUrl: getYouTubeThumbnailUrl(ytId),
       });
+    }
 
+    setIsInspectingUrl(true);
+    const currentRequestId = ++activeRequestIdRef.current;
+
+    debounceTimerRef.current = setTimeout(async () => {
       try {
         const res = await fetch('/api/extract-url-info', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: val }),
+          body: JSON.stringify({ url: trimmed }),
         });
+
+        // Guard against out-of-order / stale responses
+        if (currentRequestId !== activeRequestIdRef.current) return;
+
         if (res.ok) {
           const data = await res.json();
           setUrlPreview(data);
+        } else {
+          setUrlPreview(null);
         }
       } catch (err) {
-        console.warn('URL inspection error:', err);
+        if (currentRequestId === activeRequestIdRef.current) {
+          console.warn('URL inspection error:', err);
+        }
       } finally {
-        setIsInspectingUrl(false);
+        if (currentRequestId === activeRequestIdRef.current) {
+          setIsInspectingUrl(false);
+        }
       }
-    }
+    }, 300);
   };
+
+  const MAX_FILE_SIZE_BYTES = 40 * 1024 * 1024; // 40MB limit to guarantee safe base64 fit within 100MB server limit
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      setInputError(`File exceeds 40MB upload limit (${(file.size / (1024 * 1024)).toFixed(1)}MB). Please choose a file under 40MB.`);
+      setSelectedFile(null);
+      setFileAudioPreview(null);
+      return;
+    }
+
     setInputError(null);
     setSelectedFile(file);
 
-    // Create object URL for local audio preview
+    // Create object URL for local audio/video preview
     if (file.type.startsWith('audio/') || file.type.startsWith('video/')) {
       const url = URL.createObjectURL(file);
       setFileAudioPreview(url);
@@ -158,6 +206,13 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
     e.preventDefault();
     const file = e.dataTransfer.files?.[0];
     if (file) {
+      if (file.size > MAX_FILE_SIZE_BYTES) {
+        setInputError(`File exceeds 40MB upload limit (${(file.size / (1024 * 1024)).toFixed(1)}MB). Please choose a file under 40MB.`);
+        setSelectedFile(null);
+        setFileAudioPreview(null);
+        return;
+      }
+
       setInputError(null);
       setSelectedFile(file);
       if (file.type.startsWith('audio/') || file.type.startsWith('video/')) {
@@ -356,12 +411,17 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
               </button>
             </div>
 
-            {/* Processing Duration Note */}
-            <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl text-xs text-slate-400 flex items-start gap-2.5">
-              <Sparkles className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
-              <div className="leading-relaxed">
-                <span className="font-semibold text-slate-300">Processing Time Note: </span>
-                Extracting dialogue, determining speaker turns, generating millisecond-precise subtitle timecodes, and translating into the target language typically takes <strong>10 to 25 seconds</strong>. For instantaneous 0-second testing, check the <strong className="text-indigo-400">Quick Samples</strong> tab.
+            {/* Media Source & Acoustic Fidelity Note */}
+            <div className="p-3.5 bg-slate-900/60 border border-slate-800 rounded-xl text-xs text-slate-400 space-y-2">
+              <div className="flex items-start gap-2.5">
+                <Sparkles className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+                <div className="leading-relaxed">
+                  <span className="font-semibold text-slate-200">Acoustic Speech Analysis vs. Streaming Links: </span>
+                  Direct media files (<code className="text-indigo-300 font-mono">.mp4</code>, <code className="text-indigo-300 font-mono">.webm</code>, <code className="text-indigo-300 font-mono">.mov</code>, <code className="text-indigo-300 font-mono">.mp3</code>, <code className="text-indigo-300 font-mono">.wav</code>, <code className="text-indigo-300 font-mono">.m4a</code>) are downloaded in full by TransLumina and analyzed with true acoustic waveform speech recognition.
+                </div>
+              </div>
+              <div className="text-[11px] text-slate-500 pl-6 leading-relaxed border-t border-slate-800/60 pt-2">
+                <strong className="text-slate-400">YouTube & Spotify:</strong> These platforms restrict third-party datacenter audio streaming. For 100% guaranteed acoustic transcription of a YouTube or Spotify clip, drop the audio/video file directly into the <strong className="text-indigo-400">File Upload</strong> tab.
               </div>
             </div>
 
@@ -416,7 +476,7 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
                   {selectedFile ? selectedFile.name : 'Click to upload or drag & drop audio or video'}
                 </p>
                 <p className="text-xs text-slate-500 mt-1">
-                  MP3, WAV, MP4, M4A, WebM, OGG, FLAC (up to 50MB)
+                  MP3, WAV, MP4, M4A, WebM, OGG, FLAC (up to 40MB)
                 </p>
               </div>
             </div>

@@ -33,6 +33,23 @@ export const SummaryCard: React.FC<SummaryCardProps> = ({
           ) : null}
           <span aria-hidden="true">·</span>
           <span>{segmentCount} dialogue cues</span>
+          <span aria-hidden="true">·</span>
+          {metadata.sourceType === 'sample' ? (
+            <span className="text-cyan-400 font-mono text-[11px] flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+              Studio Demo
+            </span>
+          ) : metadata.transcriptType === 'web-grounded' ? (
+            <span className="text-amber-300 font-mono text-[11px] flex items-center gap-1" title="Derived from verified web context because streaming platform restricts raw audio downloading. Upload media file for 100% acoustic waveform transcription.">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+              Web-Grounded Dialogue
+            </span>
+          ) : (
+            <span className="text-emerald-400 font-mono text-[11px] flex items-center gap-1" title="Transcribed directly from authentic binary acoustic waveforms">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              Acoustic Waveform
+            </span>
+          )}
         </div>
 
         <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight mt-1">

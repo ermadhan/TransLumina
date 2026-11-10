@@ -183,6 +183,7 @@ export default function App() {
         keyTopics: parsed.keyTopics,
         author: urlInfo.author,
         thumbnailUrl: urlInfo.thumbnailUrl || (ytId ? getYouTubeThumbnailUrl(ytId) : undefined),
+        transcriptType: parsed.transcriptType || (isVideo || isYouTube ? 'web-grounded' : 'acoustic-waveform'),
         createdAt: new Date().toISOString(),
       });
 

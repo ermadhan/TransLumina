@@ -118,16 +118,25 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
     }
   }, []);
 
+  const activeDubAudioRef = useRef<HTMLAudioElement | null>(null);
+  const spokenCueIdRef = useRef<string | null>(null);
+
   // Compute the audio URL for local sample speech
   const resolvedAudioSrc = useMemo(() => {
     const isSample = metadata.sourceType === 'sample' || metadata.id.startsWith('sample-');
     if (isSample) {
       if (audioMode === 'speech-translated') {
-        return '/api/audio/sample-es.mp3';
+        // If sample target is Spanish, sample-es.mp3 is the studio recording
+        if (metadata.targetLanguage.toLowerCase().startsWith('es')) {
+          return '/api/audio/sample-es.mp3';
+        }
+        // For other target languages on samples, return null so per-cue dub speaks in target language
+        return null;
       }
       return '/api/audio/sample-en.mp3';
     }
-    return metadata.mediaUrl;
+    // For non-sample media, when audioMode is 'speech-translated', original audio is muted and per-cue dub speaks
+    return audioMode === 'speech-original' ? metadata.mediaUrl : null;
   }, [metadata, audioMode]);
 
   // Sync Duration when metadata updates
@@ -136,6 +145,94 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
       setDuration(metadata.duration);
     }
   }, [metadata.duration]);
+
+  // Per-cue Translated Dub playback for non-sample media or non-Spanish sample translations
+  useEffect(() => {
+    if (audioMode !== 'speech-translated' || !isPlaying) {
+      if (activeDubAudioRef.current) {
+        activeDubAudioRef.current.pause();
+      }
+      if (!isPlaying && typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+      return;
+    }
+
+    if (!activeSegment) return;
+    if (spokenCueIdRef.current === activeSegment.id) return;
+    spokenCueIdRef.current = activeSegment.id;
+
+    // Spanish sample has the full native studio MP3 playing continuously
+    const isSpanishSample = (metadata.sourceType === 'sample' || metadata.id.startsWith('sample-')) &&
+      metadata.targetLanguage.toLowerCase().startsWith('es');
+    if (isSpanishSample) return;
+
+    if (activeDubAudioRef.current) {
+      activeDubAudioRef.current.pause();
+    }
+
+    const textToSpeak = activeSegment.translatedText || activeSegment.originalText;
+    if (!textToSpeak || !textToSpeak.trim()) return;
+
+    const audio = new Audio(`/api/speak-cue?text=${encodeURIComponent(textToSpeak)}&voice=Kore`);
+    activeDubAudioRef.current = audio;
+    audio.play().catch(() => {
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(textToSpeak);
+        window.speechSynthesis.speak(utterance);
+      }
+    });
+  }, [activeSegment, audioMode, isPlaying, metadata]);
+
+  // Listen for YouTube postMessage events (time updates, player state changes)
+  useEffect(() => {
+    if (!isYouTube) return;
+
+    // Send initial handshake
+    const handshakeInterval = setInterval(() => {
+      sendYouTubeCommand('listening');
+    }, 1000);
+
+    const handleWindowMessage = (event: MessageEvent) => {
+      try {
+        if (!event.data) return;
+        const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (!data || typeof data !== 'object') return;
+
+        // YouTube infoDelivery events contain real-time currentTime, duration, playerState
+        if (data.event === 'infoDelivery' && data.info) {
+          if (typeof data.info.currentTime === 'number' && !isNaN(data.info.currentTime)) {
+            onTimeUpdate(data.info.currentTime);
+          }
+          if (typeof data.info.duration === 'number' && data.info.duration > 0 && !isNaN(data.info.duration)) {
+            setDuration(data.info.duration);
+          }
+          // playerState: 1 = PLAYING, 2 = PAUSED, 0 = ENDED
+          if (data.info.playerState === 1 && !isPlayingRef.current) {
+            onTogglePlay();
+          } else if ((data.info.playerState === 2 || data.info.playerState === 0) && isPlayingRef.current) {
+            onTogglePlay();
+          }
+        } else if (data.event === 'onStateChange') {
+          if (data.info === 1 && !isPlayingRef.current) {
+            onTogglePlay();
+          } else if ((data.info === 2 || data.info === 0) && isPlayingRef.current) {
+            onTogglePlay();
+          }
+        }
+      } catch {
+        // Non-YouTube message, safely ignore
+      }
+    };
+
+    window.addEventListener('message', handleWindowMessage);
+
+    return () => {
+      clearInterval(handshakeInterval);
+      window.removeEventListener('message', handleWindowMessage);
+    };
+  }, [isYouTube, onTimeUpdate, onTogglePlay, sendYouTubeCommand]);
 
   // Initialize YouTube Iframe Player API
   useEffect(() => {
