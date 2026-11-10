@@ -1,0 +1,6 @@
+{
+  "name": "TransLumina - Multilingual Media Translator & Transcript Studio",
+  "description": "Transcribe and translate audio and video from YouTube, streaming links, and file uploads into 50+ languages with synchronized bilingual playback and instant SRT, VTT, TXT, and Markdown exports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
