@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { SUPPORTED_LANGUAGES, LanguageOption } from './types/transcript';
 import { SAMPLE_MEDIA_LIBRARY } from './utils/sampleData';
+import { extractYouTubeId, getYouTubeThumbnailUrl } from './utils/youtube';
 
 interface MediaInputSectionProps {
   onProcessFile: (file: File, sourceLang: string, targetLang: string) => Promise<void>;
@@ -111,8 +112,16 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
       return;
     }
 
-    if (val.includes('youtube.com') || val.includes('youtu.be')) {
+    const ytId = extractYouTubeId(val);
+    if (ytId) {
       setIsInspectingUrl(true);
+      // Immediately set provisional preview with thumbnail while inspecting
+      setUrlPreview({
+        type: 'youtube',
+        title: val.includes('/shorts/') ? 'YouTube Short' : 'YouTube Video',
+        thumbnailUrl: getYouTubeThumbnailUrl(ytId),
+      });
+
       try {
         const res = await fetch('/api/extract-url-info', {
           method: 'POST',
@@ -315,6 +324,21 @@ export const MediaInputSection: React.FC<MediaInputSectionProps> = ({
                 className="text-xs px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
               >
                 TED-Style Talk (YouTube)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setUrlInput('https://www.youtube.com/shorts/a-Mui2QYF-0');
+                  setUrlPreview({
+                    title: 'YouTube Short (a-Mui2QYF-0)',
+                    author: 'Creator',
+                    thumbnailUrl: 'https://img.youtube.com/vi/a-Mui2QYF-0/hqdefault.jpg',
+                    type: 'youtube',
+                  });
+                }}
+                className="text-xs px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 border border-slate-700 transition-colors cursor-pointer"
+              >
+                YouTube Short (a-Mui2QYF-0)
               </button>
               <button
                 type="button"

@@ -48,26 +48,49 @@ const ai = new GoogleGenAI({
 
 // Helper to extract YouTube video ID
 function extractYouTubeId(url: string): string | null {
+  if (!url || typeof url !== 'string') return null;
+  const trimmed = url.trim();
+
   try {
-    const parsed = new URL(url);
-    if (parsed.hostname.includes('youtube.com')) {
-      if (parsed.pathname === '/watch') {
-        return parsed.searchParams.get('v');
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+
+    if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
+      if (parsed.pathname.startsWith('/shorts/')) {
+        const id = parsed.pathname.split('/shorts/')[1]?.split('/')[0]?.split('?')[0];
+        if (id && id.length >= 11) return id.substring(0, 11);
+      }
+      if (parsed.pathname === '/watch' || parsed.pathname === '/watch_videos') {
+        const v = parsed.searchParams.get('v');
+        if (v && v.length >= 11) return v.substring(0, 11);
       }
       if (parsed.pathname.startsWith('/embed/')) {
-        return parsed.pathname.split('/embed/')[1];
+        const id = parsed.pathname.split('/embed/')[1]?.split('/')[0]?.split('?')[0];
+        if (id && id.length >= 11) return id.substring(0, 11);
       }
       if (parsed.pathname.startsWith('/v/')) {
-        return parsed.pathname.split('/v/')[1];
+        const id = parsed.pathname.split('/v/')[1]?.split('/')[0]?.split('?')[0];
+        if (id && id.length >= 11) return id.substring(0, 11);
       }
-    } else if (parsed.hostname === 'youtu.be') {
-      return parsed.pathname.slice(1);
+    } else if (host === 'youtu.be' || host.endsWith('.youtu.be')) {
+      const id = parsed.pathname.slice(1).split('/')[0]?.split('?')[0];
+      if (id && id.length >= 11) return id.substring(0, 11);
     }
   } catch {
-    // If not a full URL, check for standard 11-char regex
-    const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-    return match ? match[1] : null;
+    // Fall back to regex
   }
+
+  const match = trimmed.match(
+    /(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([\w-]{11})/i
+  );
+  if (match && match[1]) {
+    return match[1];
+  }
+
+  if (/^[\w-]{11}$/.test(trimmed)) {
+    return trimmed;
+  }
+
   return null;
 }
 

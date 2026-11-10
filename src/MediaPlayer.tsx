@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useRef, useEffect, useState, useMemo } from 'react';
+import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Play,
   Pause,
@@ -15,10 +15,12 @@ import {
   Gauge,
   Mic,
   Globe,
-  Radio
+  Radio,
+  ExternalLink
 } from 'lucide-react';
 import { formatDisplayTime } from './utils/exportFormats';
 import { MediaMetadata, TranscriptSegment } from './types/transcript';
+import { extractYouTubeId, getYouTubeEmbedUrl } from './utils/youtube';
 
 interface MediaPlayerProps {
   metadata: MediaMetadata;
@@ -34,6 +36,33 @@ interface MediaPlayerProps {
 
 export type AudioOutputMode = 'speech-original' | 'speech-translated' | 'ambient-stream';
 
+// Declare YouTube Iframe API types for TypeScript
+declare global {
+  interface Window {
+    YT?: {
+      Player: new (
+        elementId: string | HTMLElement,
+        config: {
+          videoId?: string;
+          playerVars?: Record<string, unknown>;
+          events?: {
+            onReady?: (event: { target: any }) => void;
+            onStateChange?: (event: { data: number; target: any }) => void;
+            onError?: (event: { data: number }) => void;
+          };
+        }
+      ) => any;
+      PlayerState?: {
+        PLAYING: number;
+        PAUSED: number;
+        ENDED: number;
+        BUFFERING: number;
+      };
+    };
+    onYouTubeIframeAPIReady?: () => void;
+  }
+}
+
 export const MediaPlayer: React.FC<MediaPlayerProps> = ({
   metadata,
   activeSegment,
@@ -46,15 +75,50 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
   onSeekRelative,
 }) => {
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const ytPlayerRef = useRef<any>(null);
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+
   const [duration, setDuration] = useState(metadata.duration || 60);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [showOverlayCaptions, setShowOverlayCaptions] = useState(true);
-
-  // Audio track mode: Spoken Original Voice, Spoken Translated Dub, or Raw Media Stream
   const [audioMode, setAudioMode] = useState<AudioOutputMode>('speech-original');
 
-  // Compute the exact spoken audio URL based on chosen mode
+  // Identify YouTube videos and Shorts
+  const ytVideoId = useMemo(() => {
+    return extractYouTubeId(metadata.mediaUrl || '');
+  }, [metadata.mediaUrl]);
+
+  const isYouTube = !!ytVideoId;
+  const isShort = useMemo(() => {
+    return !!metadata.mediaUrl && (metadata.mediaUrl.includes('/shorts/') || metadata.mediaUrl.includes('shorts'));
+  }, [metadata.mediaUrl]);
+
+  const isVideo = !isYouTube && (metadata.mediaType === 'video' || (metadata.mediaUrl && /\.(mp4|webm|mov)(\?.*)?$/i.test(metadata.mediaUrl)));
+
+  // Generate safe embed URL
+  const ytEmbedUrl = useMemo(() => {
+    if (!ytVideoId) return '';
+    return getYouTubeEmbedUrl(ytVideoId, { autoplay: false });
+  }, [ytVideoId]);
+
+  // Direct postMessage sender to control YouTube iframe immediately
+  const sendYouTubeCommand = useCallback((func: string, args: unknown[] = []) => {
+    if (iframeRef.current?.contentWindow) {
+      try {
+        iframeRef.current.contentWindow.postMessage(
+          JSON.stringify({ event: 'command', func, args }),
+          '*'
+        );
+      } catch (err) {
+        console.warn('postMessage to YouTube failed:', err);
+      }
+    }
+  }, []);
+
+  // Compute the audio URL for local sample speech
   const resolvedAudioSrc = useMemo(() => {
     const isSample = metadata.sourceType === 'sample' || metadata.id.startsWith('sample-');
     if (isSample) {
@@ -63,65 +127,251 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
       }
       return '/api/audio/sample-en.mp3';
     }
-
     return metadata.mediaUrl;
   }, [metadata, audioMode]);
 
-  // When seekTargetTime changes, seek the underlying media element
+  // Sync Duration when metadata updates
   useEffect(() => {
-    if (seekTargetTime !== null && mediaRef.current) {
-      mediaRef.current.currentTime = seekTargetTime;
-      onSeekComplete();
+    if (metadata.duration && metadata.duration > 0) {
+      setDuration(metadata.duration);
     }
-  }, [seekTargetTime, onSeekComplete]);
+  }, [metadata.duration]);
+
+  // Initialize YouTube Iframe Player API
+  useEffect(() => {
+    if (!isYouTube || !ytVideoId) return;
+
+    let isSubscribed = true;
+
+    const initPlayer = () => {
+      if (!window.YT || !window.YT.Player || !iframeRef.current) return;
+      try {
+        ytPlayerRef.current = new window.YT.Player(iframeRef.current, {
+          events: {
+            onReady: (event) => {
+              if (!isSubscribed) return;
+              try {
+                const dur = event.target.getDuration();
+                if (dur && !isNaN(dur) && dur > 0) {
+                  setDuration(dur);
+                }
+                if (isMuted) {
+                  event.target.mute();
+                }
+                if (playbackRate !== 1) {
+                  event.target.setPlaybackRate(playbackRate);
+                }
+              } catch (e) {
+                console.warn('YouTube onReady error:', e);
+              }
+            },
+            onStateChange: (event) => {
+              if (!isSubscribed) return;
+              // 1 = PLAYING, 2 = PAUSED, 0 = ENDED
+              if (event.data === 1 && !isPlayingRef.current) {
+                onTogglePlay();
+              } else if ((event.data === 2 || event.data === 0) && isPlayingRef.current) {
+                onTogglePlay();
+              }
+            },
+          },
+        });
+      } catch (err) {
+        console.warn('Error instantiating YouTube Player API:', err);
+      }
+    };
+
+    if (window.YT && window.YT.Player) {
+      initPlayer();
+    } else {
+      // Load YouTube API script if not present
+      if (!document.getElementById('yt-iframe-api-script')) {
+        const tag = document.createElement('script');
+        tag.id = 'yt-iframe-api-script';
+        tag.src = 'https://www.youtube.com/iframe_api';
+        const firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag?.parentNode?.insertBefore(tag, firstScriptTag);
+      }
+
+      const prevCallback = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => {
+        if (prevCallback) prevCallback();
+        if (isSubscribed) initPlayer();
+      };
+    }
+
+    return () => {
+      isSubscribed = false;
+      if (ytPlayerRef.current?.destroy) {
+        try {
+          ytPlayerRef.current.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      ytPlayerRef.current = null;
+    };
+  }, [isYouTube, ytVideoId, onTogglePlay]);
+
+  // Handle Play / Pause commands across YouTube, native Video, and Audio
+  useEffect(() => {
+    if (isYouTube) {
+      if (isPlaying) {
+        if (ytPlayerRef.current?.playVideo) {
+          try { ytPlayerRef.current.playVideo(); } catch { sendYouTubeCommand('playVideo'); }
+        } else {
+          sendYouTubeCommand('playVideo');
+        }
+      } else {
+        if (ytPlayerRef.current?.pauseVideo) {
+          try { ytPlayerRef.current.pauseVideo(); } catch { sendYouTubeCommand('pauseVideo'); }
+        } else {
+          sendYouTubeCommand('pauseVideo');
+        }
+      }
+    } else if (mediaRef.current) {
+      if (isPlaying) {
+        mediaRef.current.play().catch(console.warn);
+      } else {
+        mediaRef.current.pause();
+      }
+    }
+  }, [isPlaying, isYouTube, sendYouTubeCommand]);
+
+  // Handle Seeking across YouTube and Native Media
+  useEffect(() => {
+    if (seekTargetTime !== null) {
+      if (isYouTube) {
+        if (ytPlayerRef.current?.seekTo) {
+          try { ytPlayerRef.current.seekTo(seekTargetTime, true); } catch { sendYouTubeCommand('seekTo', [seekTargetTime, true]); }
+        } else {
+          sendYouTubeCommand('seekTo', [seekTargetTime, true]);
+        }
+        onTimeUpdate(seekTargetTime);
+        onSeekComplete();
+      } else if (mediaRef.current) {
+        mediaRef.current.currentTime = seekTargetTime;
+        onSeekComplete();
+      }
+    }
+  }, [seekTargetTime, isYouTube, onSeekComplete, onTimeUpdate, sendYouTubeCommand]);
 
   // Sync playback rate
   useEffect(() => {
-    if (mediaRef.current) {
+    if (isYouTube) {
+      if (ytPlayerRef.current?.setPlaybackRate) {
+        try { ytPlayerRef.current.setPlaybackRate(playbackRate); } catch { sendYouTubeCommand('setPlaybackRate', [playbackRate]); }
+      } else {
+        sendYouTubeCommand('setPlaybackRate', [playbackRate]);
+      }
+    } else if (mediaRef.current) {
       mediaRef.current.playbackRate = playbackRate;
     }
-  }, [playbackRate]);
+  }, [playbackRate, isYouTube, sendYouTubeCommand]);
 
-  // Handle native media events
-  const handleTimeUpdate = () => {
+  // Sync mute state and Voice Audio mode (mute YouTube video when playing translated dub voice)
+  useEffect(() => {
+    const shouldMute = isMuted || (isYouTube && audioMode === 'speech-translated');
+    if (isYouTube) {
+      if (ytPlayerRef.current) {
+        try {
+          if (shouldMute) ytPlayerRef.current.mute();
+          else ytPlayerRef.current.unMute();
+        } catch {
+          sendYouTubeCommand(shouldMute ? 'mute' : 'unMute');
+        }
+      } else {
+        sendYouTubeCommand(shouldMute ? 'mute' : 'unMute');
+      }
+    } else if (mediaRef.current) {
+      mediaRef.current.muted = shouldMute;
+    }
+  }, [isMuted, audioMode, isYouTube, sendYouTubeCommand]);
+
+  // Time tracking ticker for YouTube playback
+  useEffect(() => {
+    if (!isYouTube || !isPlaying) return;
+
+    const interval = setInterval(() => {
+      let updatedTime: number | null = null;
+      if (ytPlayerRef.current?.getCurrentTime) {
+        try {
+          const t = ytPlayerRef.current.getCurrentTime();
+          if (typeof t === 'number' && !isNaN(t) && t >= 0) {
+            updatedTime = t;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (updatedTime !== null) {
+        onTimeUpdate(updatedTime);
+      } else {
+        // Fallback clock tick
+        onTimeUpdate(Math.min(duration, currentTime + 0.25));
+      }
+
+      // Check duration
+      if (ytPlayerRef.current?.getDuration) {
+        try {
+          const dur = ytPlayerRef.current.getDuration();
+          if (dur && !isNaN(dur) && dur > 0 && dur !== duration) {
+            setDuration(dur);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }, 250);
+
+    return () => clearInterval(interval);
+  }, [isYouTube, isPlaying, duration, currentTime, onTimeUpdate]);
+
+  // Native media events (video / audio tags)
+  const handleNativeTimeUpdate = () => {
     if (mediaRef.current) {
       onTimeUpdate(mediaRef.current.currentTime);
     }
   };
 
-  const handleLoadedMetadata = () => {
-    if (mediaRef.current && mediaRef.current.duration && !isNaN(mediaRef.current.duration)) {
+  const handleNativeLoadedMetadata = () => {
+    if (mediaRef.current?.duration && !isNaN(mediaRef.current.duration)) {
       setDuration(mediaRef.current.duration);
     }
   };
 
-  // Play or pause native media element according to isPlaying prop
-  useEffect(() => {
-    if (!mediaRef.current) return;
-    if (isPlaying) {
-      mediaRef.current.play().catch(console.warn);
-    } else {
-      mediaRef.current.pause();
-    }
-  }, [isPlaying]);
-
-  const togglePlay = () => {
-    onTogglePlay();
-  };
-
-  const seekRelative = (delta: number) => {
-    onSeekRelative(delta);
-  };
-
+  // Scrubber scrubbing
   const handleScrubberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
-    if (mediaRef.current) {
+    onTimeUpdate(val);
+    if (isYouTube) {
+      if (ytPlayerRef.current?.seekTo) {
+        try { ytPlayerRef.current.seekTo(val, true); } catch { sendYouTubeCommand('seekTo', [val, true]); }
+      } else {
+        sendYouTubeCommand('seekTo', [val, true]);
+      }
+    } else if (mediaRef.current) {
       mediaRef.current.currentTime = val;
-      onTimeUpdate(val);
     }
   };
 
-  // Switch audio track seamlessly while keeping current playback time
+  // Relative Seek button (±5s)
+  const handleSeekRelative = (delta: number) => {
+    const newTime = Math.max(0, Math.min(duration, currentTime + delta));
+    onSeekRelative(delta);
+    if (isYouTube) {
+      if (ytPlayerRef.current?.seekTo) {
+        try { ytPlayerRef.current.seekTo(newTime, true); } catch { sendYouTubeCommand('seekTo', [newTime, true]); }
+      } else {
+        sendYouTubeCommand('seekTo', [newTime, true]);
+      }
+    } else if (mediaRef.current) {
+      mediaRef.current.currentTime = newTime;
+    }
+  };
+
+  // Audio Mode toggle
   const handleSwitchAudioMode = (mode: AudioOutputMode) => {
     setAudioMode(mode);
     if (mediaRef.current) {
@@ -138,16 +388,20 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
     }
   };
 
-  const isVideo = metadata.mediaType === 'video' || (metadata.mediaUrl && /\.(mp4|webm|mov)(\?.*)?$/i.test(metadata.mediaUrl));
-  const isYouTube = metadata.mediaUrl && (metadata.mediaUrl.includes('youtube.com') || metadata.mediaUrl.includes('youtu.be'));
-
   return (
     <div className="bg-[#111827] border border-slate-800 rounded-2xl overflow-hidden shadow-xl flex flex-col">
       {/* Audio Track Selector Banner */}
       <div className="px-4 py-2.5 bg-slate-900 border-b border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex items-center gap-2">
           <Radio className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-          <span className="font-semibold text-slate-300">Voice Audio Track:</span>
+          <span className="font-semibold text-slate-300">
+            {isYouTube ? (isShort ? 'YouTube Short Sync:' : 'YouTube Audio Track:') : 'Voice Audio Track:'}
+          </span>
+          {isYouTube && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/10 border border-rose-500/20 text-rose-300 font-mono">
+              {isShort ? '9:16 Shorts' : 'YouTube Sync'}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-1 p-0.5 bg-slate-950 border border-slate-800 rounded-lg">
@@ -158,7 +412,7 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
                 ? 'bg-indigo-600 text-white font-semibold shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
-            title="Hear Dr. Vance speaking in English (Original Voice)"
+            title="Hear original spoken audio in source language"
           >
             <Mic className="w-3 h-3 text-cyan-300" />
             <span>Spoken Speech ({metadata.sourceLanguage})</span>
@@ -182,19 +436,39 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
       {/* Media Screen / Visualizer Viewport */}
       <div className="relative bg-black aspect-video sm:aspect-[16/9] flex items-center justify-center overflow-hidden">
         {isYouTube ? (
-          <iframe
-            src={`${metadata.mediaUrl?.replace('watch?v=', 'embed/')}?enablejsapi=1&autoplay=0`}
-            title={metadata.title}
-            className="w-full h-full border-0"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-            allowFullScreen
-          />
+          <div className="w-full h-full flex items-center justify-center bg-black">
+            {isShort ? (
+              // YouTube Shorts vertical 9:16 container
+              <div className="h-full aspect-[9/16] max-w-[340px] mx-auto bg-black relative shadow-2xl border-x border-slate-800">
+                <iframe
+                  ref={iframeRef}
+                  id="translumina-yt-player"
+                  src={ytEmbedUrl}
+                  title={metadata.title}
+                  className="w-full h-full border-0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              </div>
+            ) : (
+              // Standard 16:9 YouTube video
+              <iframe
+                ref={iframeRef}
+                id="translumina-yt-player"
+                src={ytEmbedUrl}
+                title={metadata.title}
+                className="w-full h-full border-0"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowFullScreen
+              />
+            )}
+          </div>
         ) : isVideo && metadata.mediaUrl ? (
           <video
             ref={mediaRef as React.RefObject<HTMLVideoElement>}
             src={metadata.mediaUrl}
-            onTimeUpdate={handleTimeUpdate}
-            onLoadedMetadata={handleLoadedMetadata}
+            onTimeUpdate={handleNativeTimeUpdate}
+            onLoadedMetadata={handleNativeLoadedMetadata}
             onPlay={() => { if (!isPlaying) onTogglePlay(); }}
             onPause={() => { if (isPlaying) onTogglePlay(); }}
             className="w-full h-full object-contain"
@@ -207,8 +481,8 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
                 key={resolvedAudioSrc}
                 ref={mediaRef as React.RefObject<HTMLAudioElement>}
                 src={resolvedAudioSrc}
-                onTimeUpdate={handleTimeUpdate}
-                onLoadedMetadata={handleLoadedMetadata}
+                onTimeUpdate={handleNativeTimeUpdate}
+                onLoadedMetadata={handleNativeLoadedMetadata}
                 onPlay={() => { if (!isPlaying) onTogglePlay(); }}
                 onPause={() => { if (isPlaying) onTogglePlay(); }}
               />
@@ -287,7 +561,7 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
           {/* Left: Playback Controls */}
           <div className="flex items-center gap-2">
             <button
-              onClick={() => seekRelative(-5)}
+              onClick={() => handleSeekRelative(-5)}
               className="p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer"
               title="Rewind 5 seconds"
             >
@@ -295,15 +569,15 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
             </button>
 
             <button
-              onClick={togglePlay}
+              onClick={onTogglePlay}
               className="p-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/30 transition-all cursor-pointer"
-              title={isPlaying ? 'Pause' : 'Play Spoken Speech'}
+              title={isPlaying ? 'Pause' : 'Play Video / Audio'}
             >
               {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 fill-current" />}
             </button>
 
             <button
-              onClick={() => seekRelative(5)}
+              onClick={() => handleSeekRelative(5)}
               className="p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer"
               title="Forward 5 seconds"
             >
@@ -345,17 +619,25 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
 
             {/* Mute Button */}
             <button
-              onClick={() => {
-                if (mediaRef.current) {
-                  mediaRef.current.muted = !isMuted;
-                  setIsMuted(!isMuted);
-                }
-              }}
+              onClick={() => setIsMuted(!isMuted)}
               className="p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
               title={isMuted ? 'Unmute' : 'Mute'}
             >
               {isMuted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4" />}
             </button>
+
+            {/* Direct Open YouTube Link if applicable */}
+            {isYouTube && metadata.mediaUrl && (
+              <a
+                href={metadata.mediaUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-400 hover:text-white transition-colors"
+                title="Open original video on YouTube"
+              >
+                <ExternalLink className="w-4 h-4" />
+              </a>
+            )}
           </div>
         </div>
       </div>

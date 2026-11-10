@@ -12,6 +12,7 @@ import { SummaryCard } from './SummaryCard';
 import { ExportModal } from './ExportModal';
 import { TranscriptSegment, MediaMetadata } from './types/transcript';
 import { SAMPLE_MEDIA_LIBRARY } from './utils/sampleData';
+import { extractYouTubeId, getYouTubeThumbnailUrl } from './utils/youtube';
 import { Download, PlusCircle, Wand2, FileAudio } from 'lucide-react';
 
 export default function App() {
@@ -165,12 +166,13 @@ export default function App() {
       const result = await response.json();
       const parsed = result.data;
 
-      const isYouTube = url.includes('youtube.com') || url.includes('youtu.be');
+      const ytId = extractYouTubeId(url);
+      const isYouTube = !!ytId;
       const isVideo = isYouTube || /\.(mp4|webm|mov)(\?.*)?$/i.test(url);
 
       setCurrentMetadata({
         id: `url-${Date.now()}`,
-        title: parsed.title || urlInfo.title || 'Online Media',
+        title: parsed.title || urlInfo.title || (isYouTube ? 'YouTube Video' : 'Online Media'),
         sourceType: 'url',
         mediaUrl: url,
         mediaType: isVideo ? 'video' : 'audio',
@@ -180,7 +182,7 @@ export default function App() {
         summary: parsed.summary,
         keyTopics: parsed.keyTopics,
         author: urlInfo.author,
-        thumbnailUrl: urlInfo.thumbnailUrl,
+        thumbnailUrl: urlInfo.thumbnailUrl || (ytId ? getYouTubeThumbnailUrl(ytId) : undefined),
         createdAt: new Date().toISOString(),
       });
 
