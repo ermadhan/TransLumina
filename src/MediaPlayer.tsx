@@ -163,15 +163,21 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
       if (activeDubAudioRef.current) {
         activeDubAudioRef.current.pause();
       }
+      spokenCueIdRef.current = null;
       if (!isPlaying && typeof window !== 'undefined' && window.speechSynthesis) {
         window.speechSynthesis.cancel();
       }
       return;
     }
 
-    if (!activeSegment) return;
-    if (spokenCueIdRef.current === activeSegment.id) return;
-    spokenCueIdRef.current = activeSegment.id;
+    if (!activeSegment) {
+      spokenCueIdRef.current = null;
+      return;
+    }
+
+    const spokenCueKey = `${metadata.id}:${metadata.targetLanguage}:${activeSegment.id}`;
+    if (spokenCueIdRef.current === spokenCueKey) return;
+    spokenCueIdRef.current = spokenCueKey;
 
     // Spanish sample has the full native studio MP3 playing continuously
     const isSpanishSample = (metadata.sourceType === 'sample' || metadata.id.startsWith('sample-')) &&

@@ -15,6 +15,17 @@ import { SAMPLE_MEDIA_LIBRARY } from './utils/sampleData';
 import { extractYouTubeId, getYouTubeThumbnailUrl } from './utils/youtube';
 import { Download, PlusCircle, Wand2, FileAudio } from 'lucide-react';
 
+async function readJsonResponse(response: Response): Promise<any> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Server returned an unexpected non-JSON response (HTTP ${response.status}). Restart the dev server (npm run dev) and reload the page.`
+    );
+  }
+}
+
 export default function App() {
   // Preload initial sample project so workstation is immediately populated and usable
   const defaultSample = SAMPLE_MEDIA_LIBRARY[0];
@@ -100,7 +111,7 @@ export default function App() {
         throw new Error(errJson.error || 'Server processing failed');
       }
 
-      const result = await response.json();
+      const result = await readJsonResponse(response);
       const parsed = result.data;
 
       const fileUrl = URL.createObjectURL(file);
@@ -145,7 +156,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
       });
-      const urlInfo = infoRes.ok ? await infoRes.json() : {};
+      const urlInfo = infoRes.ok ? await readJsonResponse(infoRes).catch(() => ({})) : {};
 
       setProcessingStage('Generating timestamped transcript with Gemini...');
 
@@ -165,7 +176,7 @@ export default function App() {
         throw new Error(errJson.error || 'Failed to process media URL');
       }
 
-      const result = await response.json();
+      const result = await readJsonResponse(response);
       const parsed = result.data;
 
       const ytId = extractYouTubeId(url);
@@ -246,7 +257,7 @@ export default function App() {
         throw new Error('Re-translation request failed');
       }
 
-      const data = await res.json();
+      const data = await readJsonResponse(res);
       setSegments(data.segments);
       setCurrentMetadata((prev) => ({ ...prev, targetLanguage: newLanguage }));
       setGlobalNotification(`Subtitles translated to ${newLanguage}!`);

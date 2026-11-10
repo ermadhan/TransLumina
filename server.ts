@@ -3,11 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import express, { Request, Response } from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dns from 'dns';
+import { createHash } from 'crypto';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -18,8 +19,53 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || '127.0.0.1';
 
 import fs from 'fs';
+
+function createRateLimiter(limit: number, windowMs: number) {
+  const requests = new Map<string, { count: number; resetAt: number }>();
+  const maxTrackedClients = 10_000;
+
+  return (req: Request, res: Response, next: express.NextFunction) => {
+    const now = Date.now();
+    const clientKey = req.ip || req.socket.remoteAddress || 'unknown';
+    let entry = requests.get(clientKey);
+
+    if (!entry || entry.resetAt <= now) {
+      if (requests.size >= maxTrackedClients && !entry) {
+        for (const [key, value] of requests) {
+          if (value.resetAt <= now) requests.delete(key);
+        }
+        if (requests.size >= maxTrackedClients) {
+          return res.status(503).json({ error: 'Request capacity temporarily exceeded. Try again shortly.' });
+        }
+      }
+
+      entry = { count: 0, resetAt: now + windowMs };
+      requests.set(clientKey, entry);
+    }
+
+    res.setHeader('RateLimit-Limit', limit);
+    res.setHeader('RateLimit-Remaining', Math.max(0, limit - entry.count));
+    res.setHeader('RateLimit-Reset', Math.ceil(entry.resetAt / 1000));
+
+    if (entry.count >= limit) {
+      res.setHeader('Retry-After', Math.max(1, Math.ceil((entry.resetAt - now) / 1000)));
+      return res.status(429).json({ error: 'Too many requests. Try again later.' });
+    }
+
+    entry.count += 1;
+    res.setHeader('RateLimit-Remaining', Math.max(0, limit - entry.count));
+    next();
+  };
+}
+
+app.use('/api/process-media', createRateLimiter(8, 60_000));
+app.use('/api/translate-existing', createRateLimiter(20, 60_000));
+app.use('/api/sample-audio', createRateLimiter(10, 60_000));
+app.use('/api/speak-cue', createRateLimiter(30, 60_000));
+app.use('/api/tts', createRateLimiter(10, 60_000));
 
 // Body parsing with generous limit for audio/video media uploads (100MB)
 app.use(express.json({ limit: '100mb' }));
@@ -439,7 +485,44 @@ Input segments: ${JSON.stringify(segmentsPayload)}`;
 });
 
 // Audio cache for spoken audio clips
-const audioCache = new Map<string, string>();
+const MAX_AUDIO_CACHE_ENTRIES = 100;
+const MAX_AUDIO_CACHE_BYTES = 32 * 1024 * 1024;
+const audioCache = new Map<string, { data: string; bytes: number }>();
+let audioCacheBytes = 0;
+
+function getCachedAudio(cacheKey: string): string | undefined {
+  const cached = audioCache.get(cacheKey);
+  if (!cached) return undefined;
+
+  audioCache.delete(cacheKey);
+  audioCache.set(cacheKey, cached);
+  return cached.data;
+}
+
+function setCachedAudio(cacheKey: string, data: string): void {
+  const bytes = Buffer.byteLength(data, 'base64');
+  if (bytes > MAX_AUDIO_CACHE_BYTES) return;
+
+  const existing = audioCache.get(cacheKey);
+  if (existing) {
+    audioCacheBytes -= existing.bytes;
+    audioCache.delete(cacheKey);
+  }
+
+  while (
+    audioCache.size >= MAX_AUDIO_CACHE_ENTRIES ||
+    audioCacheBytes + bytes > MAX_AUDIO_CACHE_BYTES
+  ) {
+    const oldestKey = audioCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    const oldest = audioCache.get(oldestKey);
+    if (oldest) audioCacheBytes -= oldest.bytes;
+    audioCache.delete(oldestKey);
+  }
+
+  audioCache.set(cacheKey, { data, bytes });
+  audioCacheBytes += bytes;
+}
 
 // Serve real spoken presentation audio for demo samples in requested language
 app.get('/api/sample-audio/:id/:lang', async (req: Request, res: Response) => {
@@ -447,8 +530,9 @@ app.get('/api/sample-audio/:id/:lang', async (req: Request, res: Response) => {
     const { id, lang } = req.params;
     const cacheKey = `${id}-${lang}`;
 
-    if (audioCache.has(cacheKey)) {
-      const base64 = audioCache.get(cacheKey)!;
+    const cachedAudio = getCachedAudio(cacheKey);
+    if (cachedAudio) {
+      const base64 = cachedAudio;
       const buffer = Buffer.from(base64, 'base64');
       res.setHeader('Content-Type', 'audio/wav');
       res.setHeader('Content-Length', buffer.length);
@@ -501,7 +585,7 @@ app.get('/api/sample-audio/:id/:lang', async (req: Request, res: Response) => {
 
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (base64Audio) {
-      audioCache.set(cacheKey, base64Audio);
+      setCachedAudio(cacheKey, base64Audio);
       const buffer = Buffer.from(base64Audio, 'base64');
       res.setHeader('Content-Type', 'audio/wav');
       res.setHeader('Content-Length', buffer.length);
@@ -523,9 +607,11 @@ app.get('/api/speak-cue', async (req: Request, res: Response) => {
       return res.status(400).send('Text query param is required');
     }
 
-    const cacheKey = `cue-${text.slice(0, 80)}-${voice}`;
-    if (audioCache.has(cacheKey)) {
-      const buffer = Buffer.from(audioCache.get(cacheKey)!, 'base64');
+    const cueText = text.slice(0, 400);
+    const cacheKey = `cue-${voice}-${createHash('sha256').update(cueText).digest('hex')}`;
+    const cachedAudio = getCachedAudio(cacheKey);
+    if (cachedAudio) {
+      const buffer = Buffer.from(cachedAudio, 'base64');
       res.setHeader('Content-Type', 'audio/wav');
       res.setHeader('Content-Length', buffer.length);
       return res.send(buffer);
@@ -538,7 +624,7 @@ app.get('/api/speak-cue', async (req: Request, res: Response) => {
           role: 'user',
           parts: [
             {
-              text: text.slice(0, 400),
+              text: cueText,
               speechMetadata: {
                 style: 'Natural, clear articulate pronunciation',
               },
@@ -558,7 +644,7 @@ app.get('/api/speak-cue', async (req: Request, res: Response) => {
 
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (base64Audio) {
-      audioCache.set(cacheKey, base64Audio);
+      setCachedAudio(cacheKey, base64Audio);
       const buffer = Buffer.from(base64Audio, 'base64');
       res.setHeader('Content-Type', 'audio/wav');
       res.setHeader('Content-Length', buffer.length);
@@ -826,6 +912,21 @@ Ensure originalText and translatedText are clean, non-empty, and faithful to the
 
 // Setup development Vite server or static production files
 async function startServer() {
+  // Unknown API routes must never fall through to the SPA's HTML
+  app.use('/api', (_req: Request, res: Response) => {
+    res.status(404).json({ error: 'API route not found' });
+  });
+
+  // Body-parser and other errors on API routes are returned as JSON
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    if (!req.path.startsWith('/api/')) return next(err);
+    const status = err?.status || err?.statusCode || 500;
+    const message = status === 413
+      ? 'Upload is too large for the server. Please use a smaller file.'
+      : err?.message || 'Request failed';
+    res.status(status).json({ error: message });
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -840,8 +941,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`TransLumina Studio server running at http://0.0.0.0:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`TransLumina Studio server running at http://${HOST}:${PORT}`);
   });
 }
 

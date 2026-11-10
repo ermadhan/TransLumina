@@ -95,7 +95,7 @@ set GEMINI_API_KEY=AIzaSyYourActualKeyGoesHere
 
 ## 4. Running the Development Server
 
-Start the local server running Express and Vite together on Windows:
+Start the local server running Express and Vite together on Windows. The server binds to `127.0.0.1` by default, so it is only reachable from the same machine:
 
 ```powershell
 npm run dev
@@ -105,18 +105,18 @@ You should see output similar to:
 ```
   VITE v8.3.0  ready in 420 ms
 
-  ➜  Local:   http://localhost:3000/
-  ➜  Network: http://192.168.1.xxx:3000/
+  ➜  Local:   http://127.0.0.1:3000/
 
-[TransLumina Server] Listening on http://0.0.0.0:3000 (PID: 12345)
-[TransLumina Server] Gemini API Key configured: Yes
+[TransLumina Server] Listening on http://127.0.0.1:3000
 ```
 
 ### Accessing the Studio
 Open your browser (Chrome, Edge, Brave, or Firefox) and navigate to:
 ```
-http://localhost:3000
+http://127.0.0.1:3000
 ```
+
+Gemini-backed API routes have per-IP request limits. For trusted LAN access only, set `HOST` explicitly before starting the server, for example `$env:HOST="0.0.0.0"` in PowerShell. Do not expose this development server directly to the public internet; use an authenticated, rate-limited deployment setup instead.
 
 ---
 
