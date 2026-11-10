@@ -69,5 +69,6 @@ export const SUPPORTED_LANGUAGES: LanguageOption[] = [
   { code: 'ro', name: 'Romanian', nativeName: 'Română' },
   { code: 'hu', name: 'Hungarian', nativeName: 'Magyar' },
   { code: 'bn', name: 'Bengali', nativeName: 'বাংলা' },
+  { code: 'ta', name: 'Tamil', nativeName: 'தமிழ்' },
   { code: 'en', name: 'English', nativeName: 'English' },
 ];
