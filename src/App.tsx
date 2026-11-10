@@ -21,6 +21,7 @@ export default function App() {
   const [segments, setSegments] = useState<TranscriptSegment[]>(defaultSample.segments);
 
   // Playback & Timing state
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [seekTargetTime, setSeekTargetTime] = useState<number | null>(null);
 
@@ -38,6 +39,16 @@ export default function App() {
       segments.find((seg) => currentTime >= seg.start && currentTime <= seg.end) || null
     );
   }, [segments, currentTime]);
+
+  const handleTogglePlay = () => {
+    setIsPlaying((prev) => !prev);
+  };
+
+  const handleSeekRelative = (delta: number) => {
+    const newTime = Math.max(0, currentTime + delta);
+    setSeekTargetTime(newTime);
+    setCurrentTime(newTime);
+  };
 
   // Handle Seeking
   const handleSeek = (time: number) => {
@@ -325,6 +336,9 @@ export default function App() {
               onTimeUpdate={setCurrentTime}
               seekTargetTime={seekTargetTime}
               onSeekComplete={handleSeekComplete}
+              isPlaying={isPlaying}
+              onTogglePlay={handleTogglePlay}
+              onSeekRelative={handleSeekRelative}
             />
 
             <SummaryCard
@@ -344,6 +358,9 @@ export default function App() {
               sourceLanguage={currentMetadata.sourceLanguage}
               onChangeTargetLanguage={handleChangeTargetLanguage}
               isRetranslating={isRetranslating}
+              isPlaying={isPlaying}
+              onTogglePlay={handleTogglePlay}
+              onSeekRelative={handleSeekRelative}
             />
           </div>
         </div>

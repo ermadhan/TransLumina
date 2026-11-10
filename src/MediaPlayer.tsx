@@ -27,6 +27,9 @@ interface MediaPlayerProps {
   onTimeUpdate: (time: number) => void;
   seekTargetTime: number | null;
   onSeekComplete: () => void;
+  isPlaying: boolean;
+  onTogglePlay: () => void;
+  onSeekRelative: (delta: number) => void;
 }
 
 export type AudioOutputMode = 'speech-original' | 'speech-translated' | 'ambient-stream';
@@ -38,9 +41,11 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
   onTimeUpdate,
   seekTargetTime,
   onSeekComplete,
+  isPlaying,
+  onTogglePlay,
+  onSeekRelative,
 }) => {
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(metadata.duration || 60);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
@@ -90,20 +95,22 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
     }
   };
 
-  const togglePlay = () => {
+  // Play or pause native media element according to isPlaying prop
+  useEffect(() => {
     if (!mediaRef.current) return;
     if (isPlaying) {
-      mediaRef.current.pause();
-      setIsPlaying(false);
-    } else {
       mediaRef.current.play().catch(console.warn);
-      setIsPlaying(true);
+    } else {
+      mediaRef.current.pause();
     }
+  }, [isPlaying]);
+
+  const togglePlay = () => {
+    onTogglePlay();
   };
 
   const seekRelative = (delta: number) => {
-    if (!mediaRef.current) return;
-    mediaRef.current.currentTime = Math.max(0, Math.min(duration, mediaRef.current.currentTime + delta));
+    onSeekRelative(delta);
   };
 
   const handleScrubberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -188,8 +195,8 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
             src={metadata.mediaUrl}
             onTimeUpdate={handleTimeUpdate}
             onLoadedMetadata={handleLoadedMetadata}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
+            onPlay={() => { if (!isPlaying) onTogglePlay(); }}
+            onPause={() => { if (isPlaying) onTogglePlay(); }}
             className="w-full h-full object-contain"
             playsInline
           />
@@ -202,8 +209,8 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
                 src={resolvedAudioSrc}
                 onTimeUpdate={handleTimeUpdate}
                 onLoadedMetadata={handleLoadedMetadata}
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => setIsPlaying(false)}
+                onPlay={() => { if (!isPlaying) onTogglePlay(); }}
+                onPause={() => { if (isPlaying) onTogglePlay(); }}
               />
             )}
 

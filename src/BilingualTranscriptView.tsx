@@ -3,18 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Search,
-  Languages,
   Check,
   Copy,
   Edit2,
   Clock,
-  Sparkles,
   ArrowUpDown,
   Volume2,
-  FileText
+  FileText,
+  X,
+  ChevronDown,
+  ChevronUp,
+  Filter
 } from 'lucide-react';
 import { TranscriptSegment, SUPPORTED_LANGUAGES } from './types/transcript';
 import { formatDisplayTime, copyToClipboard } from './utils/exportFormats';
@@ -28,6 +30,33 @@ interface BilingualTranscriptViewProps {
   sourceLanguage: string;
   onChangeTargetLanguage: (newLanguage: string) => Promise<void>;
   isRetranslating?: boolean;
+  isPlaying?: boolean;
+  onTogglePlay?: () => void;
+  onSeekRelative?: (deltaSeconds: number) => void;
+}
+
+// In-text keyword highlighter
+function highlightMatch(text: string, query: string): React.ReactNode {
+  if (!query.trim() || !text) return text;
+  try {
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`(${escaped})`, 'gi');
+    const parts = text.split(regex);
+    return parts.map((part, i) =>
+      regex.test(part) ? (
+        <mark
+          key={i}
+          className="bg-amber-400/30 text-amber-200 font-semibold px-0.5 rounded border border-amber-400/40"
+        >
+          {part}
+        </mark>
+      ) : (
+        part
+      )
+    );
+  } catch {
+    return text;
+  }
 }
 
 export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = ({
@@ -39,9 +68,14 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
   sourceLanguage,
   onChangeTargetLanguage,
   isRetranslating = false,
+  isPlaying = false,
+  onTogglePlay,
+  onSeekRelative,
 }) => {
   const [viewMode, setViewMode] = useState<'bilingual' | 'translated' | 'original'>('bilingual');
   const [searchQuery, setSearchQuery] = useState('');
+  const [filterOnlyMatches, setFilterOnlyMatches] = useState(false);
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
   const [autoScroll, setAutoScroll] = useState(true);
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
   const [editOriginal, setEditOriginal] = useState('');
@@ -50,6 +84,32 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
 
   const containerRef = useRef<HTMLDivElement>(null);
   const activeSegmentRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Compute segments that match the search query
+  const matchingSegments = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase();
+    return segments.filter(
+      (s) =>
+        s.originalText.toLowerCase().includes(q) ||
+        s.translatedText.toLowerCase().includes(q) ||
+        (s.speaker && s.speaker.toLowerCase().includes(q))
+    );
+  }, [segments, searchQuery]);
+
+  // Segments to display (either filtered or full list)
+  const displayedSegments = useMemo(() => {
+    if (filterOnlyMatches && searchQuery.trim()) {
+      return matchingSegments;
+    }
+    return segments;
+  }, [segments, matchingSegments, filterOnlyMatches, searchQuery]);
+
+  // Reset match index when query changes
+  useEffect(() => {
+    setCurrentMatchIndex(0);
+  }, [searchQuery]);
 
   // Auto-scroll to active segment
   useEffect(() => {
@@ -60,6 +120,91 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
       });
     }
   }, [activeSegmentId, autoScroll]);
+
+  // Global Keyboard Shortcuts (Space: Play/Pause, Left/Right: Seek ±5s, Ctrl+F: Focus Search)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // 1. Ctrl+F or Cmd+F: Focus transcript search bar
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+
+      // Check if user is typing in an input or textarea
+      const target = e.target as HTMLElement | null;
+      const isInputActive =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable ||
+          target.tagName === 'SELECT');
+
+      if (isInputActive) {
+        return;
+      }
+
+      // 2. Space: Play / Pause toggle
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault();
+        onTogglePlay?.();
+        return;
+      }
+
+      // 3. Left Arrow: Seek backward 5s
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        onSeekRelative?.(-5);
+        return;
+      }
+
+      // 4. Right Arrow: Seek forward 5s
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        onSeekRelative?.(5);
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onTogglePlay, onSeekRelative]);
+
+  // Jump to next search match
+  const handleNextMatch = () => {
+    if (matchingSegments.length === 0) return;
+    const nextIdx = (currentMatchIndex + 1) % matchingSegments.length;
+    setCurrentMatchIndex(nextIdx);
+    const target = matchingSegments[nextIdx];
+    if (target) {
+      onSeek(target.start);
+    }
+  };
+
+  // Jump to previous search match
+  const handlePrevMatch = () => {
+    if (matchingSegments.length === 0) return;
+    const prevIdx = (currentMatchIndex - 1 + matchingSegments.length) % matchingSegments.length;
+    setCurrentMatchIndex(prevIdx);
+    const target = matchingSegments[prevIdx];
+    if (target) {
+      onSeek(target.start);
+    }
+  };
+
+  // Handle keyboard navigation inside search input
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      if (e.shiftKey) {
+        handlePrevMatch();
+      } else {
+        handleNextMatch();
+      }
+    } else if (e.key === 'Escape') {
+      setSearchQuery('');
+    }
+  };
 
   const handleStartEdit = (seg: TranscriptSegment) => {
     setEditingSegmentId(seg.id);
@@ -90,20 +235,10 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
     }
   };
 
-  const filteredSegments = segments.filter((s) => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      s.originalText.toLowerCase().includes(q) ||
-      s.translatedText.toLowerCase().includes(q) ||
-      (s.speaker && s.speaker.toLowerCase().includes(q))
-    );
-  });
-
   return (
     <div className="bg-[#111827] border border-slate-800 rounded-2xl flex flex-col h-full shadow-xl overflow-hidden">
       {/* Top Header & Workstation Controls */}
-      <div className="p-4 sm:p-5 border-b border-slate-800 bg-slate-900/80 space-y-3.5">
+      <div className="p-4 sm:p-5 border-b border-slate-800 bg-slate-900/90 space-y-3.5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
@@ -111,7 +246,7 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
                 <FileText className="w-5 h-5 text-indigo-400" />
                 <span>Synchronized Transcript</span>
               </h3>
-              <span className="text-xs font-mono text-slate-400 bg-slate-800 px-2 py-0.5 rounded border border-slate-700">
+              <span className="text-xs font-mono text-slate-400 bg-slate-800 px-2 py-0.5 rounded border border-slate-700 tabular-nums">
                 {segments.length} cues
               </span>
             </div>
@@ -140,58 +275,86 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
           </div>
         </div>
 
-        {/* View Mode Tabs & Search Bar */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-1">
-          {/* View Modes */}
-          <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-xl self-start">
-            <button
-              onClick={() => setViewMode('bilingual')}
-              className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
-                viewMode === 'bilingual'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Bilingual (Dual)
-            </button>
-            <button
-              onClick={() => setViewMode('translated')}
-              className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
-                viewMode === 'translated'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              {targetLanguage} Only
-            </button>
-            <button
-              onClick={() => setViewMode('original')}
-              className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
-                viewMode === 'original'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Original ({sourceLanguage})
-            </button>
+        {/* Dedicated Prominent Search Bar */}
+        <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 shadow-inner">
+          <div className="relative flex-1 flex items-center">
+            <Search className="w-4 h-4 text-indigo-400 absolute left-3 pointer-events-none" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="Search phrases or keywords in original or translated speech..."
+              className="w-full pl-9 pr-8 py-1.5 bg-transparent border-0 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-800 absolute right-2 cursor-pointer"
+                title="Clear search"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
 
-          {/* Search Bar & Auto-Scroll Toggle */}
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1 sm:w-56">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search transcript..."
-                className="w-full pl-8 pr-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              />
-              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
-            </div>
+          {/* Search Navigation Controls & Match Indicator */}
+          <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 border-t sm:border-t-0 border-slate-800/80 pt-2 sm:pt-0">
+            {searchQuery.trim() ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono tabular-nums text-slate-300 bg-slate-900 border border-slate-700 px-2 py-0.5 rounded">
+                  {matchingSegments.length > 0 ? (
+                    <>
+                      <span className="text-indigo-400 font-semibold">{currentMatchIndex + 1}</span> of{' '}
+                      {matchingSegments.length}
+                    </>
+                  ) : (
+                    <span className="text-rose-400">0 matches</span>
+                  )}
+                </span>
+
+                <div className="flex items-center gap-0.5 bg-slate-900 border border-slate-800 rounded-lg p-0.5">
+                  <button
+                    onClick={handlePrevMatch}
+                    disabled={matchingSegments.length === 0}
+                    className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                    title="Previous match (Shift+Enter)"
+                  >
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={handleNextMatch}
+                    disabled={matchingSegments.length === 0}
+                    className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                    title="Next match (Enter)"
+                  >
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <button
+                  onClick={() => setFilterOnlyMatches(!filterOnlyMatches)}
+                  className={`px-2 py-1 rounded-lg text-xs font-medium border flex items-center gap-1 transition-colors cursor-pointer ${
+                    filterOnlyMatches
+                      ? 'bg-indigo-600/30 border-indigo-500 text-indigo-300'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Toggle filtering only matching segments"
+                >
+                  <Filter className="w-3 h-3" />
+                  <span className="text-[11px]">{filterOnlyMatches ? 'Filtered' : 'All'}</span>
+                </button>
+              </div>
+            ) : (
+              <span className="text-[11px] text-slate-500 font-mono hidden sm:inline">
+                Press Enter to find next
+              </span>
+            )}
 
             <button
               onClick={() => setAutoScroll(!autoScroll)}
-              className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer ${
+              className={`px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer ${
                 autoScroll
                   ? 'bg-slate-800 border-indigo-500/50 text-indigo-300'
                   : 'bg-slate-950 border-slate-800 text-slate-500 hover:text-slate-300'
@@ -199,9 +362,71 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
               title="Toggle automatic scrolling with audio playback"
             >
               <ArrowUpDown className="w-3 h-3" />
-              <span className="hidden sm:inline">Auto-scroll</span>
+              <span className="text-[11px]">Auto-scroll</span>
             </button>
           </div>
+        </div>
+
+        {/* Keyboard Shortcuts Helper Strip */}
+        <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] text-slate-400">
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1">
+              <kbd className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-300 font-mono text-[10px]">
+                Space
+              </kbd>
+              <span>{isPlaying ? 'Pause' : 'Play'}</span>
+            </span>
+            <span className="flex items-center gap-1">
+              <kbd className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-300 font-mono text-[10px]">
+                ← / →
+              </kbd>
+              <span>±5s</span>
+            </span>
+            <span className="flex items-center gap-1">
+              <kbd className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-300 font-mono text-[10px]">
+                Ctrl+F
+              </kbd>
+              <span>Find</span>
+            </span>
+          </div>
+
+          <div className="hidden sm:block text-[11px] text-slate-500">
+            Click timecode to seek · Click 🔊 to speak
+          </div>
+        </div>
+
+        {/* View Mode Tabs */}
+        <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-xl self-start">
+          <button
+            onClick={() => setViewMode('bilingual')}
+            className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
+              viewMode === 'bilingual'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            Bilingual (Dual)
+          </button>
+          <button
+            onClick={() => setViewMode('translated')}
+            className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
+              viewMode === 'translated'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            {targetLanguage} Only
+          </button>
+          <button
+            onClick={() => setViewMode('original')}
+            className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
+              viewMode === 'original'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            Original ({sourceLanguage})
+          </button>
         </div>
       </div>
 
@@ -210,14 +435,21 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
         ref={containerRef}
         className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3.5 max-h-[550px] divide-y divide-slate-800/40"
       >
-        {filteredSegments.length === 0 ? (
-          <div className="text-center py-12 text-slate-500 text-sm">
-            No dialogue cues found matching "{searchQuery}".
+        {displayedSegments.length === 0 ? (
+          <div className="text-center py-12 text-slate-400 text-sm space-y-2">
+            <p>No dialogue cues found matching "{searchQuery}".</p>
+            <button
+              onClick={() => setSearchQuery('')}
+              className="text-xs text-indigo-400 hover:text-indigo-300 underline cursor-pointer"
+            >
+              Clear search filter
+            </button>
           </div>
         ) : (
-          filteredSegments.map((segment) => {
+          displayedSegments.map((segment) => {
             const isActive = segment.id === activeSegmentId;
             const isEditing = segment.id === editingSegmentId;
+            const isMatch = matchingSegments.some((m) => m.id === segment.id);
 
             return (
               <div
@@ -226,6 +458,8 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
                 className={`pt-3.5 transition-all rounded-xl p-3 sm:p-4 group ${
                   isActive
                     ? 'bg-indigo-950/40 border border-indigo-500/50 shadow-md shadow-indigo-950/50'
+                    : isMatch && searchQuery.trim()
+                    ? 'bg-amber-950/20 border border-amber-500/30'
                     : 'hover:bg-slate-900/50 border border-transparent'
                 }`}
               >
@@ -266,8 +500,13 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
                       onClick={(e) => {
                         e.stopPropagation();
                         onSeek(segment.start);
-                        const text = viewMode === 'translated' ? (segment.translatedText || segment.originalText) : segment.originalText;
-                        const audio = new Audio(`/api/speak-cue?text=${encodeURIComponent(text)}&voice=Kore`);
+                        const text =
+                          viewMode === 'translated'
+                            ? segment.translatedText || segment.originalText
+                            : segment.originalText;
+                        const audio = new Audio(
+                          `/api/speak-cue?text=${encodeURIComponent(text)}&voice=Kore`
+                        );
                         audio.play().catch(() => {
                           if (typeof window !== 'undefined' && window.speechSynthesis) {
                             window.speechSynthesis.cancel();
@@ -349,21 +588,30 @@ export const BilingualTranscriptView: React.FC<BilingualTranscriptViewProps> = (
                   >
                     {/* Translated Text (Shown in bilingual and translated mode) */}
                     {(viewMode === 'bilingual' || viewMode === 'translated') && (
-                      <p className={`text-sm sm:text-base font-medium leading-relaxed ${
-                        isActive ? 'text-white' : 'text-slate-200'
-                      }`}>
-                        {segment.translatedText || segment.originalText}
+                      <p
+                        className={`text-sm sm:text-base font-medium leading-relaxed ${
+                          isActive ? 'text-white' : 'text-slate-200'
+                        }`}
+                      >
+                        {highlightMatch(
+                          segment.translatedText || segment.originalText,
+                          searchQuery
+                        )}
                       </p>
                     )}
 
                     {/* Original Text (Shown in bilingual and original mode) */}
                     {(viewMode === 'bilingual' || viewMode === 'original') && (
-                      <p className={`text-xs sm:text-sm leading-relaxed ${
-                        viewMode === 'bilingual'
-                          ? 'text-slate-400 font-normal italic'
-                          : isActive ? 'text-white font-medium' : 'text-slate-200'
-                      }`}>
-                        {segment.originalText}
+                      <p
+                        className={`text-xs sm:text-sm leading-relaxed ${
+                          viewMode === 'bilingual'
+                            ? 'text-slate-400 font-normal italic'
+                            : isActive
+                            ? 'text-white font-medium'
+                            : 'text-slate-200'
+                        }`}
+                      >
+                        {highlightMatch(segment.originalText, searchQuery)}
                       </p>
                     )}
                   </div>
