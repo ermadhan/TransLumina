@@ -19,8 +19,8 @@ export const SAMPLE_MEDIA_LIBRARY: SampleMediaItem[] = [
       id: 'sample-ai-future',
       title: 'The Future of Multimodal AI & Human Collaboration',
       sourceType: 'sample',
-      // Public high-quality audio stream for reliable in-browser playback
-      mediaUrl: 'https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=creative-technology-showcase-11157.mp3',
+      // Spoken AI Speech recording
+      mediaUrl: '/api/audio/sample-en.mp3',
       mediaType: 'audio',
       sourceLanguage: 'English',
       targetLanguage: 'Spanish',
@@ -271,7 +271,7 @@ export const SAMPLE_MEDIA_LIBRARY: SampleMediaItem[] = [
       id: 'sample-nature-clip',
       title: 'Ocean Acoustics & Marine Mammal Communication',
       sourceType: 'sample',
-      mediaUrl: 'https://cdn.pixabay.com/download/audio/2022/03/15/audio_2491a92e1f.mp3?filename=ambient-nature-sounds-with-synth-21448.mp3',
+      mediaUrl: '/api/audio/sample-en.mp3',
       mediaType: 'audio',
       sourceLanguage: 'English',
       targetLanguage: 'German',

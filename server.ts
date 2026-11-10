@@ -18,9 +18,23 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
+import fs from 'fs';
+
 // Body parsing with generous limit for audio/video media uploads
 app.use(express.json({ limit: '60mb' }));
 app.use(express.urlencoded({ extended: true, limit: '60mb' }));
+
+// Dedicated route to stream real spoken audio MP3s
+app.get('/api/audio/:filename', (req: Request, res: Response) => {
+  const filename = req.params.filename;
+  const filePath = path.resolve(__dirname, 'public', 'audio', filename);
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Accept-Ranges', 'bytes');
+    return res.sendFile(filePath);
+  }
+  res.status(404).json({ error: 'Audio file not found' });
+});
 
 // Server-side Gemini client with required telemetry header
 const ai = new GoogleGenAI({
@@ -182,6 +196,186 @@ Input segments: ${JSON.stringify(segmentsPayload)}`;
   } catch (err: unknown) {
     console.error('Error re-translating transcript:', err);
     res.status(500).json({ error: (err as Error).message || 'Translation failed' });
+  }
+});
+
+// Audio cache for spoken audio clips
+const audioCache = new Map<string, string>();
+
+// Serve real spoken presentation audio for demo samples in requested language
+app.get('/api/sample-audio/:id/:lang', async (req: Request, res: Response) => {
+  try {
+    const { id, lang } = req.params;
+    const cacheKey = `${id}-${lang}`;
+
+    if (audioCache.has(cacheKey)) {
+      const base64 = audioCache.get(cacheKey)!;
+      const buffer = Buffer.from(base64, 'base64');
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', buffer.length);
+      return res.send(buffer);
+    }
+
+    let text = '';
+    let voice = 'Kore';
+
+    if (id === 'sample-ai-future') {
+      if (lang === 'es' || lang === 'Spanish') {
+        text = 'Bienvenidos a todos. Hoy estamos observando cómo la inteligencia artificial multimodal está transformando la forma en que interactuamos entre idiomas. En lugar de tratar el audio, el texto y las imágenes como flujos aislados, los nuevos modelos fundacionales los perciben en una representación unificada. Esto significa que el tono de voz, la cadencia y las pistas visuales se toman en cuenta al producir traducciones localizadas. Los subtítulos ya no son un mero intercambio palabra por palabra, sino un puente expresivo que preserva la verdadera intención del orador. Ya sea que estés viendo una conferencia educativa internacional, un podcast o un documental, la comprensión en tiempo real es finalmente accesible. Y con la sincronización automática de marcas de tiempo, los creadores pueden exportar archivos de subtítulos listos para producción en segundos en lugar de horas. Gracias por explorar este avance con nosotros. Veamos la sincronización de la transcripción en vivo en acción.';
+        voice = 'Kore';
+      } else if (lang === 'fr' || lang === 'French') {
+        text = 'Bienvenue à tous. Aujourd’hui, nous examinons comment l’intelligence artificielle multimodale change notre façon d’interagir à travers les langues. Au lieu de traiter l’audio, le texte et l’image comme des flux isolés, les nouveaux modèles fondateurs les perçoivent dans une représentation unifiée. Cela signifie que le ton de la voix, la cadence et les repères visuels sont tous pris en compte lors de la production de traductions localisées. Les sous-titres ne sont plus une simple substitution mot à mot, mais un pont expressif préservant la véritable intention de l’orateur.';
+        voice = 'Kore';
+      } else {
+        text = 'Welcome everyone. Today we are looking at how multimodal artificial intelligence is changing the way we interact across languages. Instead of treating audio, text, and imagery as isolated streams, new foundational models perceive them in a unified representation. This means that tone of voice, cadence, and visual cues are all taken into account when producing localized translations. Subtitles are no longer a blunt word-for-word swap, but an expressive bridge preserving the speaker’s true intent. Whether you are watching an international educational lecture, a podcast, or a documentary, real-time comprehension is finally accessible. And with automated timestamp synchronization, creators can export production-ready subtitle files in seconds rather than hours. Thank you for exploring this breakthrough with us. Let’s look at the live transcript synchronization in action.';
+        voice = 'Kore';
+      }
+    } else {
+      text = 'Beneath the surface of the Pacific, sound travels nearly five times faster than through air. Hydrophones anchored at three hundred meters depth capture rhythmic low-frequency pulses that carry across entire ocean basins. Preserving this acoustic wilderness is becoming one of the most critical environmental challenges of our century.';
+      voice = 'Charon';
+    }
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash-lite-tts',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text,
+              speechMetadata: {
+                style: 'Clear, articulate, natural studio voice, measured cadence',
+              },
+            },
+          ],
+        },
+      ],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: voice },
+          },
+        },
+      },
+    });
+
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (base64Audio) {
+      audioCache.set(cacheKey, base64Audio);
+      const buffer = Buffer.from(base64Audio, 'base64');
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', buffer.length);
+      return res.send(buffer);
+    }
+    res.status(500).json({ error: 'No audio returned' });
+  } catch (err: unknown) {
+    console.error('Error generating sample audio:', err);
+    res.status(500).json({ error: (err as Error).message || 'Failed to generate sample audio' });
+  }
+});
+
+// Direct audio streaming for single cue speech playback (used by cue speaker buttons)
+app.get('/api/speak-cue', async (req: Request, res: Response) => {
+  try {
+    const text = (req.query.text as string) || '';
+    const voice = (req.query.voice as string) || 'Kore';
+    if (!text.trim()) {
+      return res.status(400).send('Text query param is required');
+    }
+
+    const cacheKey = `cue-${text.slice(0, 80)}-${voice}`;
+    if (audioCache.has(cacheKey)) {
+      const buffer = Buffer.from(audioCache.get(cacheKey)!, 'base64');
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', buffer.length);
+      return res.send(buffer);
+    }
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash-lite-tts',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: text.slice(0, 400),
+              speechMetadata: {
+                style: 'Natural, clear articulate pronunciation',
+              },
+            },
+          ],
+        },
+      ],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: voice },
+          },
+        },
+      },
+    });
+
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (base64Audio) {
+      audioCache.set(cacheKey, base64Audio);
+      const buffer = Buffer.from(base64Audio, 'base64');
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', buffer.length);
+      return res.send(buffer);
+    }
+    res.status(500).send('No audio returned');
+  } catch (err: unknown) {
+    console.error('Error in /api/speak-cue:', err);
+    res.status(500).send((err as Error).message || 'Speech generation failed');
+  }
+});
+
+// Generate realistic spoken speech audio for any text or segment (JSON response)
+app.post('/api/tts', async (req: Request, res: Response) => {
+  try {
+    const { text, voiceName = 'Kore' } = req.body;
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'Text string is required' });
+    }
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash-lite-tts',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: text.slice(0, 1200),
+              speechMetadata: {
+                style: 'Clear, articulate, natural broadcast narrator speech',
+              },
+            },
+          ],
+        },
+      ],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: voiceName || 'Kore' },
+          },
+        },
+      },
+    });
+
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64Audio) {
+      return res.status(500).json({ error: 'No audio returned from Gemini speech model' });
+    }
+
+    res.json({
+      audioUrl: `data:audio/wav;base64,${base64Audio}`,
+    });
+  } catch (err: unknown) {
+    console.error('Error in /api/tts:', err);
+    res.status(500).json({ error: (err as Error).message || 'Speech generation failed' });
   }
 });
 
