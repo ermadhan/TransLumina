@@ -25,7 +25,8 @@ export interface MediaMetadata {
   keyTopics?: string[];
   thumbnailUrl?: string;
   author?: string;
-  transcriptType?: 'acoustic-waveform' | 'web-grounded' | 'sample-verified';
+  transcriptType?: 'acoustic-waveform' | 'web-grounded' | 'metadata-inferred' | 'sample-verified';
+  groundingNotice?: string;
   createdAt: string;
 }
 

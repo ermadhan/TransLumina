@@ -271,7 +271,7 @@ export const SAMPLE_MEDIA_LIBRARY: SampleMediaItem[] = [
       id: 'sample-nature-clip',
       title: 'Ocean Acoustics & Marine Mammal Communication',
       sourceType: 'sample',
-      mediaUrl: '/api/audio/sample-en.mp3',
+      mediaUrl: '/api/audio/sample-ocean.mp3',
       mediaType: 'audio',
       sourceLanguage: 'English',
       targetLanguage: 'German',

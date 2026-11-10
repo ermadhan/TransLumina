@@ -7,6 +7,7 @@ import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dns from 'dns';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -95,16 +96,69 @@ function extractYouTubeId(url: string): string | null {
 }
 
 /**
- * SSRF Protection Validator:
- * Ensures URLs only target public, safe web hosts over standard HTTP/HTTPS.
- * Disallows private/internal IP ranges, link-local, cloud metadata, and loopback addresses.
+ * Checks if an IPv4 or IPv6 address belongs to private, loopback, link-local,
+ * multicast, or cloud metadata IP space.
  */
-function isSafeExternalUrl(inputUrl: string): boolean {
+function isRestrictedIpAddress(ip: string): boolean {
+  if (!ip) return true;
+  const cleanIp = ip.trim();
+
+  // IPv4 check
+  const ipv4Match = cleanIp.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const o1 = parseInt(ipv4Match[1], 10);
+    const o2 = parseInt(ipv4Match[2], 10);
+
+    // 0.0.0.0/8 (Current network)
+    if (o1 === 0) return true;
+    // 10.0.0.0/8 (Private Class A)
+    if (o1 === 10) return true;
+    // 127.0.0.0/8 (Loopback)
+    if (o1 === 127) return true;
+    // 169.254.0.0/16 (Link-local / Cloud metadata)
+    if (o1 === 169 && o2 === 254) return true;
+    // 172.16.0.0/12 (Private Class B: 172.16 - 172.31)
+    if (o1 === 172 && o2 >= 16 && o2 <= 31) return true;
+    // 192.168.0.0/16 (Private Class C)
+    if (o1 === 192 && o2 === 168) return true;
+    // 224.0.0.0/4 (Multicast / Broadcast)
+    if (o1 >= 224) return true;
+
+    return false;
+  }
+
+  // IPv6 check
+  const lowerV6 = cleanIp.toLowerCase();
+  // Loopback (::1)
+  if (lowerV6 === '::1' || lowerV6 === '0:0:0:0:0:0:0:1') return true;
+  // Unspecified (::)
+  if (lowerV6 === '::' || lowerV6 === '0:0:0:0:0:0:0:0') return true;
+  // Link-local (fe80::/10)
+  if (lowerV6.startsWith('fe8') || lowerV6.startsWith('fe9') || lowerV6.startsWith('fea') || lowerV6.startsWith('feb')) return true;
+  // Unique local addresses (fc00::/7)
+  if (lowerV6.startsWith('fc') || lowerV6.startsWith('fd')) return true;
+  // Multicast (ff00::/8)
+  if (lowerV6.startsWith('ff')) return true;
+  // IPv4-mapped IPv6 (::ffff:127.0.0.1, etc.)
+  if (lowerV6.includes('::ffff:')) {
+    const embeddedIpv4 = lowerV6.split('::ffff:')[1];
+    if (embeddedIpv4 && isRestrictedIpAddress(embeddedIpv4)) return true;
+  }
+
+  return false;
+}
+
+/**
+ * SSRF Protection Validator with DNS resolution:
+ * Ensures URLs only target public, safe web hosts over standard HTTP/HTTPS.
+ * Resolves hostnames via DNS and verifies that all resolved IP addresses are public.
+ */
+async function validateSafeExternalUrl(inputUrl: string): Promise<{ safe: boolean; error?: string }> {
   try {
     const parsed = new URL(inputUrl);
     // Protocol check: only http and https
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return false;
+      return { safe: false, error: 'Only HTTP and HTTPS protocols are supported.' };
     }
 
     const hostname = parsed.hostname.toLowerCase();
@@ -118,51 +172,138 @@ function isSafeExternalUrl(inputUrl: string): boolean {
       hostname === 'metadata.google.internal' ||
       hostname === '169.254.169.254'
     ) {
-      return false;
-    }
-
-    // Check for IP address format and block private / loopback IP spaces
-    const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (ipv4Match) {
-      const octet1 = parseInt(ipv4Match[1], 10);
-      const octet2 = parseInt(ipv4Match[2], 10);
-
-      // Loopback (127.0.0.0/8)
-      if (octet1 === 127) return false;
-      // Current network (0.0.0.0/8)
-      if (octet1 === 0) return false;
-      // Private Class A (10.0.0.0/8)
-      if (octet1 === 10) return false;
-      // Private Class B (172.16.0.0/12: 172.16 - 172.31)
-      if (octet1 === 172 && octet2 >= 16 && octet2 <= 31) return false;
-      // Private Class C (192.168.0.0/16)
-      if (octet1 === 192 && octet2 === 168) return false;
-      // Link-local / Cloud metadata (169.254.0.0/16)
-      if (octet1 === 169 && octet2 === 254) return false;
-      // Broadcast / Multicast
-      if (octet1 >= 224) return false;
-    }
-
-    // Block IPv6 loopback / local addresses
-    if (
-      hostname === '::1' ||
-      hostname.startsWith('fe80:') ||
-      hostname.startsWith('fc00:') ||
-      hostname.startsWith('fd00:') ||
-      hostname.includes('::')
-    ) {
-      return false;
+      return { safe: false, error: 'Access to internal and metadata hosts is prohibited.' };
     }
 
     // Port check: disallow non-standard internal ports
     if (parsed.port && parsed.port !== '80' && parsed.port !== '443' && parsed.port !== '8080' && parsed.port !== '8443') {
-      return false;
+      return { safe: false, error: 'Non-standard port restricted.' };
     }
 
-    return true;
+    // If hostname is directly an IP literal
+    if (isRestrictedIpAddress(hostname)) {
+      return { safe: false, error: 'Access to private or restricted IP addresses is prohibited.' };
+    }
+
+    // Resolve domain via DNS to verify resolved IPs (protects against DNS rebinding & internal hostnames)
+    try {
+      const records = await dns.promises.lookup(hostname, { all: true });
+      if (!records || records.length === 0) {
+        return { safe: false, error: 'Host could not be resolved.' };
+      }
+      for (const rec of records) {
+        if (isRestrictedIpAddress(rec.address)) {
+          return { safe: false, error: 'Domain resolves to a restricted internal IP address.' };
+        }
+      }
+    } catch {
+      return { safe: false, error: 'DNS resolution failed for hostname.' };
+    }
+
+    return { safe: true };
   } catch {
-    return false;
+    return { safe: false, error: 'Malformed URL.' };
   }
+}
+
+/**
+ * Safe media fetcher:
+ * - Prevents SSRF bypass by manual redirect tracking and re-validating every redirect destination.
+ * - Streams chunks with an overall timeout and immediate byte-cap termination to prevent memory exhaustion.
+ */
+async function safeFetchMedia(
+  initialUrl: string,
+  maxBytes = 35 * 1024 * 1024,
+  timeoutMs = 15000
+): Promise<{ ok: boolean; buffer?: Buffer; contentType?: string; status?: number; error?: string }> {
+  let currentUrl = initialUrl;
+  const maxRedirects = 3;
+
+  for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount++) {
+    const validation = await validateSafeExternalUrl(currentUrl);
+    if (!validation.safe) {
+      return { ok: false, error: validation.error || 'Destination URL failed security validation' };
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const fetchRes = await fetch(currentUrl, {
+        signal: controller.signal,
+        redirect: 'manual', // Manual redirect control to inspect next hop
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'audio/*,video/*,*/*',
+        },
+      });
+
+      // Handle redirects manually to re-validate destination
+      if ([301, 302, 303, 307, 308].includes(fetchRes.status)) {
+        clearTimeout(timeoutId);
+        const location = fetchRes.headers.get('location');
+        if (!location) {
+          return { ok: false, error: 'Redirect location header missing' };
+        }
+        currentUrl = new URL(location, currentUrl).toString();
+        continue;
+      }
+
+      if (!fetchRes.ok) {
+        clearTimeout(timeoutId);
+        return { ok: false, status: fetchRes.status, error: `Remote server responded with ${fetchRes.status}` };
+      }
+
+      // Check Content-Length header upfront
+      const contentLengthHeader = fetchRes.headers.get('content-length');
+      if (contentLengthHeader) {
+        const declaredLength = parseInt(contentLengthHeader, 10);
+        if (!isNaN(declaredLength) && declaredLength > maxBytes) {
+          clearTimeout(timeoutId);
+          return { ok: false, error: `Media size exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit` };
+        }
+      }
+
+      // Stream body with cumulative byte tracking
+      if (!fetchRes.body) {
+        clearTimeout(timeoutId);
+        return { ok: false, error: 'No response body received' };
+      }
+
+      const reader = fetchRes.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          totalBytes += value.length;
+          if (totalBytes > maxBytes) {
+            await reader.cancel();
+            clearTimeout(timeoutId);
+            return { ok: false, error: `Media download exceeded ${Math.round(maxBytes / (1024 * 1024))}MB limit` };
+          }
+          chunks.push(value);
+        }
+      }
+
+      clearTimeout(timeoutId);
+      const combined = Buffer.concat(chunks);
+      const contentType = fetchRes.headers.get('content-type') || '';
+      return { ok: true, buffer: combined, contentType, status: fetchRes.status };
+    } catch (err: unknown) {
+      clearTimeout(timeoutId);
+      const isAbort = (err as Error).name === 'AbortError';
+      return {
+        ok: false,
+        error: isAbort ? 'Download timed out' : ((err as Error).message || 'Network download failed'),
+      };
+    }
+  }
+
+  return { ok: false, error: 'Too many redirects' };
 }
 
 // Health check endpoint
@@ -182,8 +323,9 @@ app.post('/api/extract-url-info', async (req: Request, res: Response) => {
     }
 
     const trimmedUrl = url.trim();
-    if (!isSafeExternalUrl(trimmedUrl)) {
-      return res.status(400).json({ error: 'Invalid or restricted media URL.' });
+    const validation = await validateSafeExternalUrl(trimmedUrl);
+    if (!validation.safe) {
+      return res.status(400).json({ error: validation.error || 'Invalid or restricted media URL.' });
     }
     const ytId = extractYouTubeId(trimmedUrl);
 
@@ -512,8 +654,9 @@ app.post('/api/process-media', async (req: Request, res: Response) => {
 5. Provide a title, brief summary, and 3-5 key topics.`,
       });
     } else if (mediaUrl) {
-      if (!isSafeExternalUrl(mediaUrl.trim())) {
-        return res.status(400).json({ error: 'Invalid or restricted media URL.' });
+      const urlValidation = await validateSafeExternalUrl(mediaUrl.trim());
+      if (!urlValidation.safe) {
+        return res.status(400).json({ error: urlValidation.error || 'Invalid or restricted media URL.' });
       }
 
       // Media link (YouTube, podcast, or direct web stream)
@@ -545,46 +688,26 @@ app.post('/api/process-media', async (req: Request, res: Response) => {
         return 'audio/mpeg';
       };
 
-      // Check if mediaUrl is a direct media file (audio OR video)
-      const isDirectMediaExt = /\.(mp3|wav|ogg|m4a|aac|flac|opus|mp4|webm|mov|mkv|avi|m4v)(\?.*)?$/i.test(mediaUrl);
       const isYouTube = !!ytId;
       const isSpotify = mediaUrl.includes('spotify.com');
 
       directMediaBuffer = null;
       let directMime = 'audio/mpeg';
 
-      // Attempt to download direct media stream for non-YouTube / non-Spotify links or direct files
+      // Attempt to download direct media stream using safeFetchMedia for non-YouTube / non-Spotify links
       if (!isYouTube && !isSpotify) {
         try {
-          console.log(`[TransLumina] Fetching direct media stream from: ${mediaUrl}`);
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 12000);
-          const fetchRes = await fetch(mediaUrl, {
-            signal: controller.signal,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': 'audio/*,video/*,*/*',
-            },
-          });
-          clearTimeout(timeout);
-
-          if (fetchRes.ok) {
-            const contentType = fetchRes.headers.get('content-type') || '';
-            const isMediaContent = contentType.startsWith('audio/') || contentType.startsWith('video/') || isDirectMediaExt;
-
-            if (isMediaContent) {
-              const arrayBuf = await fetchRes.arrayBuffer();
-              if (arrayBuf.byteLength > 0 && arrayBuf.byteLength <= 35 * 1024 * 1024) {
-                directMediaBuffer = Buffer.from(arrayBuf);
-                directMime = getMediaMimeType(mediaUrl, contentType);
-                console.log(`[TransLumina] Successfully downloaded direct media (${(directMediaBuffer.length / 1024 / 1024).toFixed(2)} MB, ${directMime})`);
-              } else if (arrayBuf.byteLength > 35 * 1024 * 1024) {
-                console.warn(`[TransLumina] Direct media stream exceeds 35MB limit (${(arrayBuf.byteLength / 1024 / 1024).toFixed(2)} MB)`);
-              }
-            }
+          console.log(`[TransLumina] Safely streaming media bytes from: ${mediaUrl}`);
+          const fetchResult = await safeFetchMedia(mediaUrl, 35 * 1024 * 1024, 15000);
+          if (fetchResult.ok && fetchResult.buffer) {
+            directMediaBuffer = fetchResult.buffer;
+            directMime = getMediaMimeType(mediaUrl, fetchResult.contentType);
+            console.log(`[TransLumina] Successfully downloaded direct media (${(directMediaBuffer.length / 1024 / 1024).toFixed(2)} MB, ${directMime})`);
+          } else if (fetchResult.error) {
+            console.warn(`[TransLumina] Direct media stream fetch: ${fetchResult.error}`);
           }
         } catch (fetchErr) {
-          console.warn('[TransLumina] Direct media stream fetch skipped or timed out:', fetchErr);
+          console.warn('[TransLumina] Direct media stream fetch error:', fetchErr);
         }
       }
 
@@ -605,17 +728,19 @@ Listen directly to the spoken speech in the audio track:
 4. Provide a clear title, executive summary, and 3-5 key topics.`,
         });
       } else {
-        // External platform link (YouTube, Spotify, etc.) where datacenter audio streaming is restricted
+        // External platform link (YouTube, Spotify, etc.) where direct audio extraction is restricted by platform policy
         parts.push({
           text: `The user has submitted an external media source:
 ${mediaContext}
 
-Instructions:
-1. Streaming platforms (${isYouTube ? 'YouTube' : isSpotify ? 'Spotify' : 'the remote platform'}) restrict direct server-side audio downloads. Do NOT fabricate or invent fictional dialogue quotes if you do not know the actual spoken content of this video/track.
-2. If this is a publicly recognized video, keynote, song, or talk with verified dialogue or lyrics, transcribe the authentic words and align with realistic timestamps.
-3. If specific spoken words cannot be verified, provide an authentic topic summary, outline the discussion points, and note that direct acoustic waveform speech recognition is available by uploading the audio/video file in the File Upload tab.
-4. Translate all dialogue segments into ${targetLanguage}.
-5. Produce realistic subtitle segments with start and end timestamps.
+Platform Policy Notice:
+Streaming platforms (${isYouTube ? 'YouTube' : isSpotify ? 'Spotify' : 'the remote platform'}) restrict direct server-side audio downloads. You do NOT have the raw audio stream.
+Strict Transcription & Grounding Guidelines:
+1. Ground your analysis strictly on known public information, official titles, and verified themes for this content.
+2. DO NOT fabricate, hallucinate, or invent fictional quotes as verbatim speech if the exact dialogue is unverified.
+3. If this is a verified, publicly known speech, keynote, official release, or song, provide the authentic dialogue or lyrics accurately timestamped.
+4. If specific spoken words cannot be verified, provide a chronological topic outline and synopsis of the discussion points. Label segments with descriptive topic indicators (e.g. Speaker: "[Topic Overview]" or "[Synopsis]") rather than inventing false dialogue quotes.
+5. Translate all segments into natural ${targetLanguage}.
 6. Provide an informative summary and key topic tags.`,
         });
       }
@@ -682,7 +807,10 @@ Ensure originalText and translatedText are clean, non-empty, and faithful to the
     }
 
     const hasAcousticData = Boolean(audioData || directMediaBuffer);
-    parsed.transcriptType = hasAcousticData ? 'acoustic-waveform' : 'web-grounded';
+    parsed.transcriptType = hasAcousticData ? 'acoustic-waveform' : 'metadata-inferred';
+    if (!hasAcousticData) {
+      parsed.groundingNotice = 'Platform streaming restrictions prevent direct acoustic audio download for this link. Transcript is generated from verified public topic metadata and content synopsis. For 100% word-for-word acoustic waveform transcription, upload the media file directly in the File Upload tab.';
+    }
 
     res.json({
       success: true,

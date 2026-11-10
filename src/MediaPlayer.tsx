@@ -77,6 +77,12 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const ytPlayerRef = useRef<any>(null);
+
+  // Stable callback refs to prevent re-instantiating YouTube iframe on every render/tick
+  const onTogglePlayRef = useRef(onTogglePlay);
+  onTogglePlayRef.current = onTogglePlay;
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  onTimeUpdateRef.current = onTimeUpdate;
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
 
@@ -121,22 +127,27 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
   const activeDubAudioRef = useRef<HTMLAudioElement | null>(null);
   const spokenCueIdRef = useRef<string | null>(null);
 
-  // Compute the audio URL for local sample speech
+  // Seek media to 0 when metadata (mediaUrl or id) changes
+  useEffect(() => {
+    if (mediaRef.current) {
+      mediaRef.current.currentTime = 0;
+    }
+  }, [metadata.id, metadata.mediaUrl]);
+
+  // Compute the audio URL for media playback
   const resolvedAudioSrc = useMemo(() => {
     const isSample = metadata.sourceType === 'sample' || metadata.id.startsWith('sample-');
     if (isSample) {
       if (audioMode === 'speech-translated') {
-        // If sample target is Spanish, sample-es.mp3 is the studio recording
-        if (metadata.targetLanguage.toLowerCase().startsWith('es')) {
+        // If sample target is Spanish and it's the AI Future sample, sample-es.mp3 is the studio recording
+        if (metadata.id === 'sample-ai-future' && metadata.targetLanguage.toLowerCase().startsWith('es')) {
           return '/api/audio/sample-es.mp3';
         }
-        // For other target languages on samples, return null so per-cue dub speaks in target language
-        return null;
       }
-      return '/api/audio/sample-en.mp3';
+      return metadata.mediaUrl || '/api/audio/sample-en.mp3';
     }
-    // For non-sample media, when audioMode is 'speech-translated', original audio is muted and per-cue dub speaks
-    return audioMode === 'speech-original' ? metadata.mediaUrl : null;
+    // For non-sample media, keep mediaUrl loaded so the native media element plays silently and advances clock
+    return metadata.mediaUrl || null;
   }, [metadata, audioMode]);
 
   // Sync Duration when metadata updates
@@ -203,22 +214,22 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
         // YouTube infoDelivery events contain real-time currentTime, duration, playerState
         if (data.event === 'infoDelivery' && data.info) {
           if (typeof data.info.currentTime === 'number' && !isNaN(data.info.currentTime)) {
-            onTimeUpdate(data.info.currentTime);
+            onTimeUpdateRef.current(data.info.currentTime);
           }
           if (typeof data.info.duration === 'number' && data.info.duration > 0 && !isNaN(data.info.duration)) {
             setDuration(data.info.duration);
           }
           // playerState: 1 = PLAYING, 2 = PAUSED, 0 = ENDED
           if (data.info.playerState === 1 && !isPlayingRef.current) {
-            onTogglePlay();
+            onTogglePlayRef.current();
           } else if ((data.info.playerState === 2 || data.info.playerState === 0) && isPlayingRef.current) {
-            onTogglePlay();
+            onTogglePlayRef.current();
           }
         } else if (data.event === 'onStateChange') {
           if (data.info === 1 && !isPlayingRef.current) {
-            onTogglePlay();
+            onTogglePlayRef.current();
           } else if ((data.info === 2 || data.info === 0) && isPlayingRef.current) {
-            onTogglePlay();
+            onTogglePlayRef.current();
           }
         }
       } catch {
@@ -232,9 +243,9 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
       clearInterval(handshakeInterval);
       window.removeEventListener('message', handleWindowMessage);
     };
-  }, [isYouTube, onTimeUpdate, onTogglePlay, sendYouTubeCommand]);
+  }, [isYouTube, sendYouTubeCommand]);
 
-  // Initialize YouTube Iframe Player API
+  // Initialize YouTube Iframe Player API (only runs when YouTube video changes, not on rerender/tick)
   useEffect(() => {
     if (!isYouTube || !ytVideoId) return;
 
@@ -266,9 +277,9 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
               if (!isSubscribed) return;
               // 1 = PLAYING, 2 = PAUSED, 0 = ENDED
               if (event.data === 1 && !isPlayingRef.current) {
-                onTogglePlay();
+                onTogglePlayRef.current();
               } else if ((event.data === 2 || event.data === 0) && isPlayingRef.current) {
-                onTogglePlay();
+                onTogglePlayRef.current();
               }
             },
           },
@@ -308,7 +319,7 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
       }
       ytPlayerRef.current = null;
     };
-  }, [isYouTube, ytVideoId, onTogglePlay]);
+  }, [isYouTube, ytVideoId]);
 
   // Handle Play / Pause commands across YouTube, native Video, and Audio
   useEffect(() => {
@@ -366,9 +377,16 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
     }
   }, [playbackRate, isYouTube, sendYouTubeCommand]);
 
-  // Sync mute state and Voice Audio mode (mute YouTube video when playing translated dub voice)
+  // Sync mute state and Voice Audio mode (mute YouTube, video, and audio elements when playing translated dub voice)
   useEffect(() => {
-    const shouldMute = isMuted || (isYouTube && audioMode === 'speech-translated');
+    // If it's the AI Future sample with Spanish target, sample-es.mp3 is continuous studio audio
+    const isSpanishStudioSample = metadata.id === 'sample-ai-future' &&
+      metadata.targetLanguage.toLowerCase().startsWith('es') &&
+      audioMode === 'speech-translated';
+
+    // In translated dub mode, mute native media (both video and audio) so synthesized dub voice plays cleanly
+    const shouldMute = isMuted || (audioMode === 'speech-translated' && !isSpanishStudioSample);
+
     if (isYouTube) {
       if (ytPlayerRef.current) {
         try {
@@ -383,7 +401,7 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
     } else if (mediaRef.current) {
       mediaRef.current.muted = shouldMute;
     }
-  }, [isMuted, audioMode, isYouTube, sendYouTubeCommand]);
+  }, [isMuted, audioMode, isYouTube, metadata.id, metadata.targetLanguage, sendYouTubeCommand]);
 
   // Time tracking ticker for YouTube playback
   useEffect(() => {

@@ -41,25 +41,27 @@ export default function App() {
     );
   }, [segments, currentTime]);
 
-  const handleTogglePlay = () => {
+  const handleTogglePlay = React.useCallback(() => {
     setIsPlaying((prev) => !prev);
-  };
+  }, []);
 
-  const handleSeekRelative = (delta: number) => {
-    const newTime = Math.max(0, currentTime + delta);
-    setSeekTargetTime(newTime);
-    setCurrentTime(newTime);
-  };
+  const handleSeekRelative = React.useCallback((delta: number) => {
+    setCurrentTime((curr) => {
+      const newTime = Math.max(0, curr + delta);
+      setSeekTargetTime(newTime);
+      return newTime;
+    });
+  }, []);
 
   // Handle Seeking
-  const handleSeek = (time: number) => {
+  const handleSeek = React.useCallback((time: number) => {
     setSeekTargetTime(time);
     setCurrentTime(time);
-  };
+  }, []);
 
-  const handleSeekComplete = () => {
+  const handleSeekComplete = React.useCallback(() => {
     setSeekTargetTime(null);
-  };
+  }, []);
 
   // Process File Upload via Server Endpoint
   const handleProcessFile = async (file: File, sourceLang: string, targetLang: string) => {
@@ -183,7 +185,8 @@ export default function App() {
         keyTopics: parsed.keyTopics,
         author: urlInfo.author,
         thumbnailUrl: urlInfo.thumbnailUrl || (ytId ? getYouTubeThumbnailUrl(ytId) : undefined),
-        transcriptType: parsed.transcriptType || (isVideo || isYouTube ? 'web-grounded' : 'acoustic-waveform'),
+        transcriptType: parsed.transcriptType || (isYouTube ? 'metadata-inferred' : 'acoustic-waveform'),
+        groundingNotice: parsed.groundingNotice,
         createdAt: new Date().toISOString(),
       });
 
@@ -207,6 +210,8 @@ export default function App() {
     setCurrentMetadata(found.metadata);
     setSegments(found.segments);
     setCurrentTime(0);
+    setSeekTargetTime(0);
+    setIsPlaying(false);
     setShowInputPanel(false);
     setGlobalNotification(`Loaded demo: "${found.metadata.title}"`);
     setTimeout(() => setGlobalNotification(null), 3000);

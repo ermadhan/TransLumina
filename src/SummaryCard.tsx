@@ -39,10 +39,10 @@ export const SummaryCard: React.FC<SummaryCardProps> = ({
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
               Studio Demo
             </span>
-          ) : metadata.transcriptType === 'web-grounded' ? (
-            <span className="text-amber-300 font-mono text-[11px] flex items-center gap-1" title="Derived from verified web context because streaming platform restricts raw audio downloading. Upload media file for 100% acoustic waveform transcription.">
+          ) : (metadata.transcriptType === 'web-grounded' || metadata.transcriptType === 'metadata-inferred') ? (
+            <span className="text-amber-300 font-mono text-[11px] flex items-center gap-1" title="Streaming platform policy prevents direct raw audio downloading. Transcribed from public metadata and topic synopsis.">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-              Web-Grounded Dialogue
+              Metadata Inferred
             </span>
           ) : (
             <span className="text-emerald-400 font-mono text-[11px] flex items-center gap-1" title="Transcribed directly from authentic binary acoustic waveforms">
@@ -59,6 +59,14 @@ export const SummaryCard: React.FC<SummaryCardProps> = ({
           <p className="text-xs text-slate-400 mt-0.5">By {metadata.author}</p>
         )}
       </div>
+
+      {/* Grounding Notice Callout */}
+      {metadata.groundingNotice && (
+        <div className="p-3 bg-amber-950/30 border border-amber-800/50 rounded-xl text-xs text-amber-200/90 leading-relaxed flex items-start gap-2">
+          <span className="text-amber-400 font-bold shrink-0">⚠️ Notice:</span>
+          <span>{metadata.groundingNotice}</span>
+        </div>
+      )}
 
       {/* Summary Paragraph */}
       {metadata.summary && (
