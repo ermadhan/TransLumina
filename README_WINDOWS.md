@@ -210,6 +210,13 @@ TransLumina serves sample spoken dialogue (`sample-en.mp3` and `sample-es.mp3`) 
 
 ---
 
+### Issue 6: YouTube Transcripts Differ from Spoken Speech
+YouTube blocks third-party servers from downloading raw audio streams via bot-protection challenges (`LOGIN_REQUIRED`). When pasting a YouTube link:
+- TransLumina renders the video in an embedded iFrame and generates a metadata-inferred transcript outline.
+- **For 100% authentic acoustic transcription**: Download the audio or video file (`.mp3`, `.m4a`, or `.mp4`) to your Windows machine and drop it into the **File Upload** tab (supports files up to 40 MB). TransLumina will upload the raw audio directly to Gemini's multimodal audio encoder for verbatim phoneme-level speech recognition.
+
+---
+
 ## 7. Verification Checklist
 
 Run this quick command to verify your Windows setup:

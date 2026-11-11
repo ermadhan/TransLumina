@@ -76,6 +76,30 @@ In Google AI Studio, the application automatically accesses your Gemini API key 
 
 ---
 
+## Media Ingestion & YouTube Audio Fidelity
+
+### Summary of How Media Types Behave
+
+| Media Type | Audio Pulled? | Model Input | Output Fidelity |
+| :--- | :--- | :--- | :--- |
+| **Direct Media File Upload** (`.mp4`, `.webm`, `.mp3`, `.wav`, `.m4a`) | **Yes (100%)** | Binary audio bytes (`inlineData`) | **Acoustic Waveform**: Exact phoneme-level speech-to-text with millisecond timestamps |
+| **Direct Media URL** (e.g. `https://domain.com/speech.mp3`) | **Yes** (if < 35MB) | Binary audio bytes (`inlineData`) | **Acoustic Waveform**: Exact phoneme-level speech-to-text |
+| **YouTube Link** (`/shorts/...`, `/watch?v=...`) | **No** (restricted by YouTube bot protection) | Title, ID & Metadata (`text`) | **Metadata Inferred**: Contextual synopsis & dialogue topic outline |
+
+> **Why YouTube audio is not pulled directly:**  
+> YouTube does not expose raw static audio streams and strictly blocks third-party cloud servers from scraping audio or video streams with automated bot challenges (`LOGIN_REQUIRED`). Additionally, browser cross-origin security (CORS) prevents host webpages from capturing audio buffers from cross-origin `<iframe>` embeds. As a result, submitting a YouTube URL creates a metadata-inferred transcript rather than a direct acoustic waveform transcription.
+
+### Recommended Workflow for YouTube Audio Transcription
+
+To get **verbatim, word-for-word acoustic transcription** of a YouTube video or short:
+
+1. **Download the Media**: Save the audio or video file from YouTube onto your local device as `.mp3`, `.m4a`, `.wav`, or `.mp4` using your preferred local utility or browser downloader.
+2. **Open File Upload**: In TransLumina Studio, click **"Add Media Source"** and select the **File Upload** tab (supports files up to 40 MB).
+3. **Drop and Process**: Drag and drop your audio or video file into the dropzone, select your desired Target Language, and click **"Translate & Transcribe"**.
+4. **Authentic Waveform Transcription**: TransLumina transmits the raw binary audiovisual data directly to Gemini's multimodal audio encoder, listening directly to every spoken word and phoneme for genuine, millisecond-synchronized subtitle generation.
+
+---
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
